@@ -1,0 +1,239 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -137,6 +137,7 @@
+     int                xr_layers;
+     int                xr_frame_copy, xr_msaa;
+     RhiView           *xr_right_frame;
++    RhiView           *xr_right_target;
+     int                xr_frame_paired;
+ #endif
+     VkFormat           format;
+@@ -1088,7 +1089,8 @@
+ 
+ void tsfp_vk_stereo_frame_copy(RhiImage *image, int full_frame)
+ {
+-    image->xr_frame_copy = full_frame;
++    image->xr_frame_copy = full_frame ||
++                           (tsfp_stereo_screen_effect_draw() && image->xr_frame_paired);
+ }
+ 
+ void tsfp_vk_stereo_draw(int world)
+@@ -1157,7 +1159,7 @@
+         dv = d->view;
+     uint32_t view_mask = 0;
+ #ifdef TSFP_OPENXR
+-    if (d && V.xr_uplink_eye_mask == 2 && d->xr_right)
++    if (d && (V.xr_uplink_eye_mask == 2 || V.xr_effect_view_mask == 2) && d->xr_right)
+         dv = d->xr_right;
+     VkMultisampledRenderToSingleSampledInfoEXT msaa = {
+         .sType = VK_STRUCTURE_TYPE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_INFO_EXT,
+@@ -1198,8 +1200,12 @@
+     }
+ #endif
+ #ifdef TSFP_OPENXR
+-    if (c && c->image != V.xr_world_color)
+-        c->image->xr_frame_copy = c->image->xr_frame_paired = 0;
++    if (c && c->image != V.xr_world_color) {
++        if (!V.xr_effect_view_mask)
++            c->image->xr_frame_copy = c->image->xr_frame_paired = 0;
++        else if (V.xr_effect_view_mask == 2)
++            cv = c->image->xr_right_target->view;
++    }
+ #endif
+     if (c) {
+         w = c->width;
+@@ -2565,6 +2571,7 @@
+         return;
+ #ifdef TSFP_OPENXR
+     if (V.xr_world_color == img) V.xr_world_color = NULL;
++    if (img->xr_right_target) rhi_view_destroy(img->xr_right_target);
+     if (img->xr_right_frame) rhi_view_destroy(img->xr_right_frame);
+ #endif
+     trash(T_IMAGE, (uint64_t)img->image, img->alloc);
+@@ -4344,7 +4351,8 @@
+                 v = NULL;
+ #ifdef TSFP_OPENXR
+             /* Reuse the guest's 2D shader, with an eye-specific snapshot. */
+-            if ((V.view_mask || V.xr_uplink_eye_mask) && v && v->image->xr_frame_copy) {
++            if ((V.view_mask || V.xr_effect_view_mask || V.xr_uplink_eye_mask) &&
++                v && v->image->xr_frame_copy) {
+                 if (!v->image->xr_frame_paired)
+                     return 0;
+                 if (V.xr_effect_view_mask == 2 || V.xr_uplink_eye_mask == 2)
+@@ -4363,7 +4371,8 @@
+             ii[n].sampler = VK_NULL_HANDLE;
+             ii[n].imageView = v->view;
+ #ifdef TSFP_OPENXR
+-            if (V.xr_uplink_eye_mask == 2 && v->image == V.xr_world_color) {
++            if ((V.xr_uplink_eye_mask == 2 || V.xr_effect_view_mask == 2) &&
++                v->image == V.xr_world_color) {
+                 if (!v->xr_right)
+                     return 0;
+                 ii[n].imageView = v->xr_right;
+@@ -4638,34 +4647,74 @@
+ }
+ 
+ #ifdef TSFP_OPENXR
+-static int xr_uses_frame_copy(void)
++static int xr_prepare_right_frame(RhiImage *image);
++
++static void xr_log_screen_effect(void)
+ {
+-    if (V.xr_uplink_eye_mask || !V.xr_world_active || !xr_world_target() || !V.ps)
++    const int routine = tsfp_stereo_screen_effect_draw();
++    if (!routine || !V.rt_color)
++        return;
++    static struct { int routine; unsigned paths; } seen[4];
++    const unsigned path = V.view_mask ? V.view_mask :
++                          V.xr_effect_view_mask ? 4 + V.xr_effect_view_mask : 0;
++    const unsigned bit = 1u << path;
++    for (unsigned i = 0; i < sizeof seen / sizeof seen[0]; ++i) {
++        if (!seen[i].routine)
++            seen[i].routine = routine;
++        if (seen[i].routine != routine)
++            continue;
++        if (!(seen[i].paths & bit)) {
++            seen[i].paths |= bit;
++            fprintf(stderr, "[XR-FX] guest=%08x %s=%ux%u eyes=%u pass=%u fullscreen=%d\n",
++                    routine, V.rt_color->image == V.xr_world_color ? "scene" : "target",
++                    V.area.width, V.area.height, V.view_mask, V.xr_effect_view_mask,
++                    xr_fullscreen_draw());
++        }
++        return;
++    }
++}
++
++static int xr_effect_needs_eye_draws(void)
++{
++    if (V.xr_uplink_eye_mask || !V.xr_world_active || !V.ps || !V.rt_color)
+         return 0;
++    const int world = xr_world_target();
++    const int effect = tsfp_stereo_screen_effect_draw();
++    if (!world && !effect)
++        return 0;
++    if (!world && V.rt_color->image->xr_frame_paired)
++        return 1;
+     for (uint32_t i = 0; i < V.ps->nb; ++i) {
+         const Refl *binding = &V.ps->b[i];
+         const uint32_t slot = binding->binding - RHI_VK_TEXTURE_BASE;
+-        if (binding->kind == 2 && slot < MAX_TEX && V.tex[slot] &&
+-            V.tex[slot]->image->xr_frame_copy)
++        if (binding->kind != 2 || slot >= MAX_TEX || !V.tex[slot])
++            continue;
++        RhiImage *image = V.tex[slot]->image;
++        if (image != V.rt_color->image &&
++            (image->xr_frame_copy || (effect && image == V.xr_world_color)))
+             return 1;
+     }
+     return 0;
+ }
+ #endif
+ 
+-static void draw_geometry(uint32_t n, uint32_t first, int32_t base, int indexed)
++static int draw_geometry(uint32_t n, uint32_t first, int32_t base, int indexed)
+ {
+     if (!prepare_draw())
+-        return;
++        return 0;
++#ifdef TSFP_OPENXR
++    xr_log_screen_effect();
++#endif
+     if (!indexed) {
+         vkCmdDraw(cmd(), n, 1, first, 0);
+-        return;
++        return 1;
+     }
+     BufVer *v = &V.ib->ver[V.ib->cur];
+     v->used = V.submitted + 1;
+     vkCmdBindIndexBuffer(cmd(), v->b, V.ib_offset,
+                          V.ib_bits == 32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+     vkCmdDrawIndexed(cmd(), n, 1, first, base, 0);
++    return 1;
+ }
+ 
+ static void draw_guest(uint32_t n, uint32_t first, int32_t base, int indexed)
+@@ -4673,15 +4722,23 @@
+     if (!n || (indexed && (!V.ib || !V.ib->nver)))
+         return;
+ #ifdef TSFP_OPENXR
+-    if (xr_uses_frame_copy()) {
+-        end_rendering();
+-        for (uint32_t eye = 1; eye <= 2; eye <<= 1) {
+-            V.xr_effect_view_mask = eye;
+-            draw_geometry(n, first, base, indexed);
++    if (xr_effect_needs_eye_draws()) {
++        const int world = xr_world_target();
++        RhiImage *scratch = world ? NULL : V.rt_color->image;
++        if (world || (V.rt_color->base_mip == 0 && xr_prepare_right_frame(scratch) &&
++                      scratch->xr_right_target)) {
+             end_rendering();
++            int drawn = 1;
++            for (uint32_t eye = 1; eye <= 2; eye <<= 1) {
++                V.xr_effect_view_mask = eye;
++                drawn &= draw_geometry(n, first, base, indexed);
++                end_rendering();
++            }
++            V.xr_effect_view_mask = 0;
++            if (scratch)
++                scratch->xr_frame_copy = scratch->xr_frame_paired = drawn;
++            return;
+         }
+-        V.xr_effect_view_mask = 0;
+-        return;
+     }
+ #endif
+     draw_geometry(n, first, base, indexed);
+@@ -4698,6 +4755,35 @@
+ }
+ 
+ #ifdef TSFP_OPENXR
++/* A guest offscreen pass keeps its normal 2D target and shader. Only its
++ * companion view and sampled scene copies change when replaying the right eye. */
++static int xr_prepare_right_frame(RhiImage *image)
++{
++    if (image->xr_right_frame)
++        return 1;
++    if (image->swapchain || image->xr_layers || image->desc.samples != 1 ||
++        image->desc.type != RHI_IMAGE_2D || image->desc.depth != 1 ||
++        image->desc.mip_levels != 1 || !(image->desc.bind & RHI_BIND_RENDER_TARGET))
++        return 0;
++
++    RhiImageDesc desc = image->desc;
++    desc.bind = RHI_BIND_SAMPLED | RHI_BIND_RENDER_TARGET;
++    RhiImage *right = v_image_create(&desc, NULL);
++    if (!right)
++        return 0;
++    RhiView *sampled = v_view_create(right, RHI_VIEW_SAMPLED, NULL);
++    RhiView *target = v_view_create(right, RHI_VIEW_RENDER_TARGET, NULL);
++    v_image_destroy(right);
++    if (!sampled || !target) {
++        if (sampled) v_view_destroy(sampled);
++        if (target) v_view_destroy(target);
++        return 0;
++    }
++    image->xr_right_frame = sampled;
++    image->xr_right_target = target;
++    return 1;
++}
++
+ int tsfp_vk_stereo_snapshot(RhiImage *destination)
+ {
+     RhiImage *source = V.xr_world_color;
+@@ -4713,16 +4799,8 @@
+         if (!(src.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
+             !(dst.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT))
+             return 0;
+-        RhiImageDesc desc = destination->desc;
+-        desc.bind = RHI_BIND_SAMPLED;
+-        desc.mip_levels = 1;
+-        RhiImage *right = v_image_create(&desc, NULL);
+-        if (!right)
++        if (!xr_prepare_right_frame(destination))
+             return 0;
+-        destination->xr_right_frame = v_view_create(right, RHI_VIEW_SAMPLED, NULL);
+-        v_image_destroy(right);
+-        if (!destination->xr_right_frame)
+-            return 0;
+     }
+ 
+     end_rendering();

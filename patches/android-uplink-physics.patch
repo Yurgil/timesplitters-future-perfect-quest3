@@ -1,0 +1,21 @@
+--- a/titles/futureperfect/src/recomp/gen/recomp_0002.c
++++ b/titles/futureperfect/src/recomp/gen/recomp_0002.c
+@@ -267277,7 +267277,17 @@
+     { uint32_t _icall_esp = g_esp;
+     PUSH32(esp, ebx);
+     PUSH32(esp, esi);
+-    { uint32_t _icall_target = eax; PUSH32(esp, 0x000A780Fu); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000A780Du); } /* indirect call */
++    {
++        const uint32_t _icall_target = eax;
++        PUSH32(esp, 0x000A780Fu);
++#ifdef TSFP_QUEST_GUEST_HOOKS_H
++        const int tracked = tsfp_quest_uplink_physics_begin(_icall_target);
++#endif
++        RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x000A780Du);
++#ifdef TSFP_QUEST_GUEST_HOOKS_H
++        if (tracked) tsfp_quest_uplink_physics_end();
++#endif
++    }
+     }
+     #ifdef RECOMP_STATUS_FLAGS_SUPPORTED
+     tsfp_status_forget(&g_status_flags,TSFP_STATUS_FLAGS);

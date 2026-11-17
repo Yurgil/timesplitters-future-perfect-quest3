@@ -54,3 +54,18 @@ xbox_kernel.log
 /config/pc-audio.ini.bak
 /config/pc-audio-mix.ini
 /config/pc-audio-mix.ini.tmp
+
+# Quest local build state, game data and signing keys
+/.toolchain/
+/.gradle/
+/generated/
+/captures/
+local.properties
+*.rvz
+*.apk
+*.aab
+*.keystore
+*.jks
+*.p12
+*.log
+*.tmp

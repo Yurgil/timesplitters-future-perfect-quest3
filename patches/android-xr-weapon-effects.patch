@@ -1,0 +1,54 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -4594,6 +4594,51 @@
+     vkCmdDrawIndexed(cmd(), n, 1, first, base, 0);
+ }
+ 
++#ifdef TSFP_OPENXR
++RhiImage *tsfp_vk_uplink_source(void)
++{
++    return tsfp_vk_uplink_world_bound() ? V.xr_world_color : NULL;
++}
++
++int tsfp_vk_uplink_copy(RhiImage *destination, const RhiBox boxes[2])
++{
++    RhiImage *source = tsfp_vk_uplink_source();
++    if (!source || !destination || source == destination || source->format != destination->format ||
++        source->desc.samples != 1 || destination->desc.samples != 1 || destination->desc.depth != 2 ||
++        source->desc.width != destination->desc.width || source->desc.height != destination->desc.height)
++        return 0;
++    VkImageCopy regions[2];
++    unsigned count = 0;
++    for (unsigned eye = 0; eye < 2; ++eye) {
++        const RhiBox *box = &boxes[eye];
++        if (box->right > source->desc.width || box->bottom > source->desc.height ||
++            box->left >= box->right || box->top >= box->bottom)
++            continue;
++        const VkImageSubresourceLayers layer = {VK_IMAGE_ASPECT_COLOR_BIT, 0, eye, 1};
++        const VkOffset3D offset = {(int32_t)box->left, (int32_t)box->top, 0};
++        regions[count++] = (VkImageCopy){layer, offset, layer, offset,
++            {box->right - box->left, box->bottom - box->top, 1}};
++    }
++    if (!count)
++        return 0;
++    end_rendering();
++    const VkImageLayout restore = source->layout;
++    to_layout(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++    to_layout(destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++    vkCmdCopyImage(cmd(), image_handle(source), source->layout, image_handle(destination),
++                   destination->layout, count, regions);
++    to_layout(source, restore);
++    to_layout(destination, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++    return 1;
++}
++
++void tsfp_vk_shield_capture(unsigned stage)
++{
++    if (tsfp_vk_uplink_world_bound())
++        tsfp_xr_shield_capture(V.xr_world_color, stage);
++}
++#endif
++
+ static int v_image_resolve(RhiImage *source,uint32_t source_sub,RhiImage *destination,uint32_t destination_sub)
+ {
+     VkImageResolve region;VkImage src,dst;

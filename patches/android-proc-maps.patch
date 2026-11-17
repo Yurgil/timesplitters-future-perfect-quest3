@@ -1,0 +1,136 @@
+diff --git a/src/native/host_pages.c b/src/native/host_pages.c
+index c2a6853a..8b76e0c9 100644
+--- a/src/native/host_pages.c
++++ b/src/native/host_pages.c
+@@ -9,8 +9,12 @@
+ #include <sys/mman.h>
+ #if defined(__linux__) && !defined(__APPLE__)
+ #include <stdio.h>
++#ifdef __ANDROID__
++#include "host_maps_text.h"
++#else
+ #include <inttypes.h>
+ #endif
++#endif
+ #if defined(__APPLE__)
+ #include <mach/mach.h>
+ #include <mach/mach_vm.h>
+@@ -110,12 +114,18 @@ int tsfp_host_pages_query(const void *address,tsfp_host_page_region *out) {
+      * /proc returns the containing VMA, or a gap; never report the next VMA.
+      * This is a snapshot, just like VirtualQuery and mach_vm_region. */
+     FILE *maps=fopen("/proc/self/maps","r");
+-    char line[4096],permissions[5];
++    char line[4096];
+     uintptr_t start,end;
+     int found=0;
+     if(!maps)return 0;
+     while(fgets(line,sizeof line,maps)) {
++#ifdef __ANDROID__
++        const char *permissions=tsfp_map_line(line,&start,&end);
++        if(!permissions)continue;
++#else
++        char permissions[5];
+         if(sscanf(line,"%" SCNxPTR "-%" SCNxPTR " %4s",&start,&end,permissions)!=3)continue;
++#endif
+         if(pointer<start)break;
+         if(pointer>=end)continue;
+         if(end<=start)break;
+diff --git a/src/runtime/pc_guest_memory.h b/src/runtime/pc_guest_memory.h
+index 6d929813..732e2625 100644
+--- a/src/runtime/pc_guest_memory.h
++++ b/src/runtime/pc_guest_memory.h
+@@ -11,6 +11,9 @@
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <sys/ioctl.h>
++#ifdef __ANDROID__
++#include "host_maps_text.h"
++#endif
+ /* Linux 6.11 PROCMAP_QUERY UAPI. Keep the fixed ABI layout here so builds
+  * using older distro headers can use a newer running kernel. No map snapshots
+  * are cached: each query observes current mprotect/unmap boundaries. */
+@@ -49,6 +52,7 @@ static inline PcGuestRegion pc_guest_query_region(uintptr_t address)
+     region.writable=(info.protection&VM_PROT_WRITE)!=0;
+ #elif defined(__linux__)
+     /* Query current protection boundaries; never cache across guest execution. */
++#ifndef __ANDROID__
+     int fd=open("/proc/self/maps",O_RDONLY
+ #ifdef O_CLOEXEC
+                 |O_CLOEXEC
+@@ -68,12 +72,23 @@ static inline PcGuestRegion pc_guest_query_region(uintptr_t address)
+     }
+     /* Old kernels retain the text parser. Holes and denied queries fail closed. */
+     if(error!=ENOTTY && error!=EINVAL && error!=ENOSYS && error!=EOPNOTSUPP)return region;
++#endif /* Android apps can read the maps file, but SELinux denies this ioctl. */
+     FILE *maps=fopen("/proc/self/maps","r");
+     if(!maps)return region;
+-    char line[512],permissions[5];unsigned long long lo,hi;
++    char line[512];
+     while(fgets(line,sizeof line,maps)) {
++#ifdef __ANDROID__
++        uintptr_t lo,hi;
++        const char *permissions=tsfp_map_line(line,&lo,&hi);
++        if(!permissions)continue;
++        if(address<lo)break;
++        if(address>=hi)continue;
++#else
++        unsigned long long lo,hi;
++        char permissions[5];
+         if(sscanf(line,"%llx-%llx %4s",&lo,&hi,permissions)!=3)continue;
+         if(address<lo || address>=hi)continue;
++#endif
+         if(permissions[0]=='r') {
+             region.base=(uintptr_t)lo;region.size=(size_t)(hi-lo);
+             region.writable=permissions[1]=='w';
+--- /dev/null
++++ b/src/runtime/host_maps_text.h
+@@ -0,0 +1,49 @@
++#ifndef TSFP_HOST_MAPS_TEXT_H
++#define TSFP_HOST_MAPS_TEXT_H
++
++#include <stdint.h>
++
++static inline const char *tsfp_map_hex(const char *text, uintptr_t *value)
++{
++    const char *start = text;
++    uintptr_t result = 0;
++    for (;; ++text) {
++        unsigned c = (unsigned char)*text;
++        unsigned digit = c - '0';
++        if (digit > 9) {
++            digit = (c | 0x20u) - 'a';
++            if (digit > 5)
++                break;
++            digit += 10;
++        }
++        if (result > (UINTPTR_MAX >> 4))
++            return 0;
++        result = (result << 4) | digit;
++    }
++    if (text == start)
++        return 0;
++    *value = result;
++    return text;
++}
++
++/* Linux /proc/self/maps begins with hex-start, hex-end and four permissions. */
++static inline const char *tsfp_map_line(const char *line, uintptr_t *lo, uintptr_t *hi)
++{
++    const char *text = tsfp_map_hex(line, lo);
++    if (!text || *text != '-')
++        return 0;
++    text = tsfp_map_hex(text + 1, hi);
++    if (!text || *hi <= *lo || (*text != ' ' && *text != '\t'))
++        return 0;
++    do {
++        ++text;
++    } while (*text == ' ' || *text == '\t');
++    if ((text[0] != 'r' && text[0] != '-') ||
++        (text[1] != 'w' && text[1] != '-') ||
++        (text[2] != 'x' && text[2] != '-') ||
++        (text[3] != 'p' && text[3] != 's'))
++        return 0;
++    return text;
++}
++
++#endif

@@ -1,0 +1,111 @@
+--- a/titles/futureperfect/src/recomp_manual.c
++++ b/titles/futureperfect/src/recomp_manual.c
+@@ -713,10 +713,15 @@
+ }
+ 
+ extern void sub_000A2430_gen(void);
++#ifdef TSFP_QUEST_STEREO_PROBE
++static void quest_avatar_clip(void);
++#endif
+ void sub_000A2430(void)
+ {
+ #ifdef TSFP_PC_CONTROLS
+     pc_story_network_replica_clip(sub_000A2430_gen);
++#elif defined(TSFP_QUEST_STEREO_PROBE)
++    quest_avatar_clip();
+ #else
+     sub_000A2430_gen();
+ #endif
+@@ -1659,6 +1664,9 @@
+ {
+ #if defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_PROMPTS)
+     pc_controls_apply_mouse(FP_MEM32(0x007B0C7Cu), FP_MEM32(0x007B0CC0u), g_xbox_mem_offset);
++#elif defined(TSFP_QUEST_STEREO_PROBE)
++    extern void tsfp_stereo_apply_snap_turn(void);
++    tsfp_stereo_apply_snap_turn();
+ #endif
+     sub_000D2B80_gen();
+ }
+@@ -1702,6 +1710,12 @@
+ {
+ #if defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
+     pc_display_perspective_projection(sub_00151CF0_gen);
++#elif defined(TSFP_QUEST_STEREO_PROBE)
++    extern void tsfp_stereo_probe_weapon(uint32_t address);
++    const uint32_t destination = FP_MEM32(g_esp) == 0x001B7482u ? FP_MEM32(g_esp + 4) : 0;
++    sub_00151CF0_gen();
++    if (destination)
++        tsfp_stereo_probe_weapon(destination);
+ #else
+     sub_00151CF0_gen();
+ #endif
+@@ -2104,6 +2118,11 @@
+ #endif
+ #if defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
+     pc_display_camera(sub_000C77C0_gen);
++#elif defined(TSFP_QUEST_STEREO_PROBE)
++    extern void tsfp_stereo_probe_camera(uint32_t caller);
++    const uint32_t caller = FP_MEM32(g_esp);
++    sub_000C77C0_gen();
++    tsfp_stereo_probe_camera(caller);
+ #else
+     sub_000C77C0_gen();
+ #endif
+@@ -2125,7 +2144,19 @@
+ extern void sub_0024A1A0_gen(void);
+ void sub_0024A1A0(void) { pc_ghost_render(sub_0024A1A0_gen); }
+ extern void sub_0018EA90_gen(void);
+-void sub_0018EA90(void) { pc_ghost_model_node(sub_0018EA90_gen); }
++void sub_0018EA90(void)
++{
++#ifdef TSFP_QUEST_STEREO_PROBE
++    extern int tsfp_stereo_model_begin(uint32_t instance, uint32_t node, uint32_t view);
++    extern void tsfp_stereo_model_end(int previous);
++    const int previous = tsfp_stereo_model_begin(FP_MEM32(g_esp + 4u), FP_MEM32(g_esp + 8u),
++                                                 FP_MEM32(g_esp + 16u));
++#endif
++    pc_ghost_model_node(sub_0018EA90_gen);
++#ifdef TSFP_QUEST_STEREO_PROBE
++    tsfp_stereo_model_end(previous);
++#endif
++}
+ extern void sub_0001D3E0_gen(void);
+ void sub_0001D3E0(void) { pc_ghost_billboard_begin(sub_0001D3E0_gen); }
+ extern void sub_0001D380_gen(void);
+@@ -2317,6 +2348,36 @@
+     RECOMP_DIAG_UNLOCK();
+     fflush(stderr);
+ }
++
++#ifdef TSFP_QUEST_STEREO_PROBE
++static void quest_avatar_clip(void)
++{
++    extern int tsfp_stereo_avatar_after_cull(uint32_t entity);
++    extern void sub_000A1DC0(void);
++    /* A79B0 clips the entities in the world draw bucket. Other callers
++     * also use A2430 for visibility checks unrelated to rendering. */
++    const uint32_t player = FP_MEM32(0x007B0C7Cu);
++    const uint32_t entity = FP_MEM32(g_esp + 4);
++    const int local = FP_MEM32(g_esp) == 0x000A79EBu &&
++        player && entity && entity == FP_MEM32(player + 0x14u);
++    sub_000A2430_gen();
++    if (!local || !tsfp_stereo_avatar_after_cull(entity))
++        return;
++
++    /* The stock culled path skips allocating and evaluating the animated
++     * model. Use the same preparation called by the visible path. */
++    const uint32_t flags = FP_MEM32(entity + 0x28u);
++    if ((flags & 0x00300000u) == 0x00100000u) {
++        const uint32_t stack = g_esp;
++        g_esp = stack - 8;
++        FP_MEM32(g_esp) = 0x000A79EBu;
++        FP_MEM32(g_esp + 4) = entity;
++        sub_000A1DC0();
++        g_esp = stack;
++    }
++    g_eax = 0;
++}
++#endif
+ /* Texture cameras share their guest-pixel layout with their copied mask. */
+ extern void sub_000C8120_gen(void);
+ void sub_000C8120(void)

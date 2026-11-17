@@ -1,0 +1,75 @@
+--- a/src/d3d/CMakeLists.txt
++++ b/src/d3d/CMakeLists.txt
+@@ -4,5 +4,5 @@
+
+ option(TSFP_NATIVE_RHI "Use the common Xbox renderer on native macOS/Linux (experimental)" OFF)
+-if(WIN32 OR (UNIX AND TSFP_NATIVE_RHI))
++if(WIN32 OR (UNIX AND TSFP_NATIVE_RHI) OR TSFP_QUEST_BOOT)
+     add_library(xbox_d3d8 STATIC
+         d3d8_device.c
+@@ -81,4 +81,8 @@
+     endif()
+
++    elseif(TSFP_QUEST_BOOT)
++        target_include_directories(xbox_d3d8 PRIVATE "${TSFP_SHARED_SOURCE}")
++        target_compile_definitions(xbox_d3d8 PUBLIC TSFP_RHI_RENDERER)
++        target_link_libraries(xbox_d3d8 PUBLIC platform SDL3::SDL3)
+     else()
+         target_sources(xbox_d3d8 PRIVATE
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -126,4 +126,6 @@
+     # and psapi for the sampling profiler's symbol and module lookups.
+     target_link_libraries(xbox_kernel PUBLIC platform kernel32 bcrypt winmm dbghelp psapi)
++elseif(TSFP_QUEST_BOOT)
++    target_link_libraries(xbox_kernel PUBLIC platform)
+ else()
+     # Linux: platform layer (POSIX host primitives) + OpenSSL for crypto.
+--- a/src/platform/win32_compat.c
++++ b/src/platform/win32_compat.c
+@@ -904,4 +904,10 @@
+     w32_object *o = (w32_object *)h;
+     if (!o || o->kind != K_THREAD) return FALSE;
++#ifdef __ANDROID__
++    /* Bionic has no pthread_cancel. Leave the thread and its state intact. */
++    (void)exitCode;
++    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
++    return FALSE;
++#else
+     pthread_cancel(o->thread);
+     pthread_mutex_lock(&o->lock);
+@@ -912,4 +918,5 @@
+     pthread_mutex_unlock(&o->lock);
+     return TRUE;
++#endif
+ }
+
+@@ -1311,4 +1311,9 @@
+ #if defined(__APPLE__)
+     // TODO: Darwin explicit_bzero equivalent is memset_s.
++#elif defined(__ANDROID__)
++    /* API 29 does not expose explicit_bzero. Volatile stores must remain. */
++    volatile unsigned char *bytes = ptr;
++    while (cnt--)
++        *bytes++ = 0;
+ #else
+     explicit_bzero(ptr, cnt);
+--- a/titles/futureperfect/src/recomp_manual.c
++++ b/titles/futureperfect/src/recomp_manual.c
+@@ -31,2 +31,9 @@
+ #include "pc_display_menu.h"
++#endif
++
++#if defined(__ANDROID__) && !defined(TSFP_NATIVE_DISPLAY) && !defined(TSFP_PC_CONTROLS)
++static void pc_network_bots_menu(void (*original)(void))
++{
++    original();
++}
+ #endif
+@@ -2347,4 +2347,6 @@
+     if(!pc_model_tree_nesting)pc_model_tree_trace();
++#ifndef __ANDROID__
+     pc_capture_model(*(const uint32_t *)((uintptr_t)g_esp+4+g_xbox_mem_offset),
+         *(const uint32_t *)((uintptr_t)g_esp+8+g_xbox_mem_offset),pc_model_tree_nesting+1);
++#endif
+     pc_model_tree_nesting++;sub_000583E0_gen();pc_model_tree_nesting--;

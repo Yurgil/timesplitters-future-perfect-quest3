@@ -1,0 +1,189 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -135,7 +135,7 @@
+     VmaAllocation      alloc;
+ #ifdef TSFP_OPENXR
+     int                xr_layers;
+-    int                xr_frame_copy;
++    int                xr_frame_copy, xr_msaa;
+ #endif
+     VkFormat           format;
+     VkImageAspectFlags aspect;
+@@ -286,6 +286,8 @@
+     RhiBuffer               *xr_body_constants;
+     RhiBuffer               *xr_tracked_constants[TSFP_MODEL_TRACKED_COUNT];
+     int                      xr_world_tried, xr_world_active, xr_draw_world;
++    int                      xr_msaa, xr_msaa_reported;
++    VkSampleCountFlagBits    xr_pass_samples;
+     int                      xr_avatar_capture;
+     int                      xr_weapon_uploaded;
+     int                      xr_body_uploaded;
+@@ -1114,6 +1116,11 @@
+         dv = d->view;
+     uint32_t view_mask = 0;
+ #ifdef TSFP_OPENXR
++    VkMultisampledRenderToSingleSampledInfoEXT msaa = {
++        .sType = VK_STRUCTURE_TYPE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_INFO_EXT,
++        .multisampledRenderToSingleSampledEnable = VK_TRUE,
++        .rasterizationSamples = VK_SAMPLE_COUNT_2_BIT,
++    };
+     if (c && c->image == V.xr_world_color && tsfp_vk_stereo_geometry()) {
+         static int logged_color, logged_depth, logged_pass;
+         if (!c->xr_array && !logged_color) {
+@@ -1176,7 +1183,21 @@
+         ri.pDepthAttachment = &da;
+         if (has_stencil(d->image->format))
+             ri.pStencilAttachment = &da;
++    }
++#ifdef TSFP_OPENXR
++    V.xr_pass_samples = VK_SAMPLE_COUNT_1_BIT;
++    if (view_mask && c->image->xr_msaa && (!d || d->image->xr_msaa)) {
++        ri.pNext = &msaa;
++        ca.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
++        da.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
++        V.xr_pass_samples = msaa.rasterizationSamples;
++    }
++    if (view_mask && !(V.xr_msaa_reported & V.xr_pass_samples)) {
++        V.xr_msaa_reported |= V.xr_pass_samples;
++        fprintf(stderr, "[XR] Stereo scene uses %ux MSAA (requested %ux)\n",
++                (unsigned)V.xr_pass_samples, tsfp_xr_msaa());
+     }
++#endif
+     vkCmdBeginRendering(V.frames[V.fi].cmd, &ri);
+     V.rendering = 1;
+     V.area.width = w;
+@@ -1395,6 +1416,9 @@
+ #ifdef TSFP_OPENXR
+     VkPhysicalDeviceMultiviewFeatures have_views = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
+     VkPhysicalDeviceMultiviewFeatures views = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
++    VkPhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT msaa = {
++        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_FEATURES_EXT,
++    };
+ #endif
+     VkPhysicalDeviceVulkan12Features f12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+     VkPhysicalDeviceVulkan13Features f13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+@@ -1447,6 +1471,11 @@
+     if (tsfp_xr_enabled()) {
+         have_views.pNext = have.pNext;
+         have.pNext = &have_views;
++    }
++    if (tsfp_xr_geometry_enabled() && tsfp_xr_msaa() == 2 &&
++        has_device_ext(VK_EXT_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_EXTENSION_NAME)) {
++        msaa.pNext = have.pNext;
++        have.pNext = &msaa;
+     }
+ #endif
+     vkGetPhysicalDeviceFeatures2(V.pd, &have);
+@@ -1516,6 +1545,22 @@
+             f2.pNext = &views;
+         }
+     }
++    if (V.feat_multiview && msaa.multisampledRenderToSingleSampled) {
++        VkPhysicalDeviceDepthStencilResolveProperties resolve = {
++            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES,
++        };
++        VkPhysicalDeviceProperties2 properties = {
++            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &resolve,
++        };
++        vkGetPhysicalDeviceProperties2(V.pd, &properties);
++        V.xr_msaa = (resolve.supportedDepthResolveModes & resolve.supportedStencilResolveModes &
++                     VK_RESOLVE_MODE_SAMPLE_ZERO_BIT) != 0;
++        if (V.xr_msaa) {
++            msaa.pNext = f2.pNext;
++            f2.pNext = &msaa;
++            exts[next++] = VK_EXT_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_EXTENSION_NAME;
++        }
++    }
+ #endif
+     dci.pNext = &f2;
+     dci.queueCreateInfoCount = 1;
+@@ -1524,8 +1569,16 @@
+     dci.ppEnabledExtensionNames = exts;
+ #ifdef TSFP_OPENXR
+     if (tsfp_xr_enabled()) {
+-        if (!tsfp_xr_create_device(vkGetInstanceProcAddr, V.pd, &dci, &V.dev))
+-            return -1;
++        if (!tsfp_xr_create_device(vkGetInstanceProcAddr, V.pd, &dci, &V.dev)) {
++            if (!V.xr_msaa)
++                return -1;
++            f2.pNext = msaa.pNext;
++            dci.enabledExtensionCount--;
++            V.xr_msaa = 0;
++            fprintf(stderr, "[XR] Retrying Vulkan device creation without MSAA\n");
++            if (!tsfp_xr_create_device(vkGetInstanceProcAddr, V.pd, &dci, &V.dev))
++                return -1;
++        }
+     } else
+ #endif
+     {
+@@ -2392,9 +2445,29 @@
+         ci.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+     ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++#ifdef TSFP_OPENXR
++    if (img->xr_layers && V.xr_msaa) {
++        VkImageFormatProperties limits;
++        const VkImageCreateFlags flag = VK_IMAGE_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
++        if (vkGetPhysicalDeviceImageFormatProperties(V.pd, f, ci.imageType, ci.tiling,
++                ci.usage, ci.flags | flag, &limits) == VK_SUCCESS &&
++            (limits.sampleCounts & VK_SAMPLE_COUNT_2_BIT) && limits.maxArrayLayers >= ci.arrayLayers) {
++            ci.flags |= flag;
++            img->xr_msaa = 1;
++        }
++    }
++#endif
+     memset(&ai, 0, sizeof ai);
+     ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+-    if (vmaCreateImage(V.vma, &ci, &ai, &img->image, &img->alloc, NULL) != VK_SUCCESS) {
++    VkResult result = vmaCreateImage(V.vma, &ci, &ai, &img->image, &img->alloc, NULL);
++#ifdef TSFP_OPENXR
++    if (result != VK_SUCCESS && img->xr_msaa) {
++        ci.flags &= ~VK_IMAGE_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
++        img->xr_msaa = 0;
++        result = vmaCreateImage(V.vma, &ci, &ai, &img->image, &img->alloc, NULL);
++    }
++#endif
++    if (result != VK_SUCCESS) {
+         fprintf(stderr, "[RHI] vulkan: image %ux%ux%u format %u could not be made\n",
+                 ci.extent.width, ci.extent.height, ci.arrayLayers, (unsigned)d->format);
+         free(img);
+@@ -3843,6 +3916,10 @@
+     k.depth = V.rt_depth ? V.rt_depth->image->format : VK_FORMAT_UNDEFINED;
+     k.samples = V.rt_color ? V.rt_color->image->desc.samples
+                            : V.rt_depth ? V.rt_depth->image->desc.samples : 1;
++#ifdef TSFP_OPENXR
++    if (V.view_mask)
++        k.samples = V.xr_pass_samples;
++#endif
+     k.topo_class = topo_class(V.topology);
+     k.view_mask = V.view_mask;
+     if(V.compat12) {
+--- a/src/d3d/d3d8_states.c
++++ b/src/d3d/d3d8_states.c
+@@ -12,6 +12,10 @@
+ 
+ #include "d3d8_internal.h"
+ #include "d3d8_display.h"
++#ifdef TSFP_OPENXR
++#include "stereo_probe.h"
++#include "xr.h"
++#endif
+ #include <string.h>
+ #include <stdio.h>
+ 
+@@ -381,6 +385,15 @@
+      * they are the ones asking for a linear filter. */
+     {
+         UINT forced = d3d8_display_policy()->anisotropy;
++#ifdef TSFP_OPENXR
++        if (tsfp_xr_world_active() && tsfp_xr_anisotropy() > forced && !tsfp_stereo_hud_draw() &&
++            tss[D3DTSS_MIPFILTER] != D3DTEXF_NONE) {
++            D3D8TextureInfo info;
++            if (d3d8_texture_info(d3d8_GetStageTexture(stage), &info) && info.levels > 1 &&
++                !(info.usage & D3DUSAGE_RENDERTARGET))
++                forced = tsfp_xr_anisotropy();
++        }
++#endif
+ 
+         if (forced > 1 &&
+             (sd.filter == RHI_FILTER_LINEAR ||

@@ -1,0 +1,126 @@
+--- a/src/d3d/d3d8_shaders.c
++++ b/src/d3d/d3d8_shaders.c
+@@ -18,6 +18,10 @@
+ 
+ #include "graphics/point_size_shader.h"
+ #include "d3d8_internal.h"
++#ifdef TSFP_OPENXR
++#include "stereo_shader.h"
++#include "stereo_backend.h"
++#endif
+ #ifdef TSFP_TEXTURE_PACK
+ #include "texture_pack.h"
+ #endif
+@@ -47,6 +51,9 @@
+  * ================================================================ */
+ 
+ static const char g_vs_source[] =
++#ifdef TSFP_OPENXR
++    TSFP_XR_EYE_UNIFORMS
++#endif
+     "cbuffer TransformCB : register(b0) {\n"
+     "    float4x4 WorldViewProj;\n"
+     "    float4x4 World;\n"
+@@ -83,6 +90,9 @@
+     "};\n"
+     "\n"
+     "struct VS_IN {\n"
++#ifdef TSFP_OPENXR
++    TSFP_XR_EYE_INPUT
++#endif
+     "    float4 pos      : POSITION;\n"
+     "    float3 normal   : NORMAL;\n"
+     "    float4 diffuse  : COLOR0;\n"
+@@ -187,6 +197,9 @@
+     "    }\n"
+     "\n"
+     "    o.pos = mul(float4(input.pos.xyz, 1.0), WorldViewProj);\n"
++#ifdef TSFP_OPENXR
++    TSFP_XR_EYE_TRANSFORM("o.pos")
++#endif
+     "    float4 viewPos4 = mul(float4(input.pos.xyz, 1.0), WorldView);\n"
+     "    o.viewpos = viewPos4;\n"
+     "    float3 posCam = viewPos4.xyz;\n"
+@@ -850,6 +863,9 @@
+     ss.name = "vs_ffp";
+     ss.entry = "main";
+     ss.target = "vs_5_0";
++#ifdef TSFP_OPENXR
++    ss.macros = tsfp_vk_stereo_macros();
++#endif
+     g_vs = rhi_shader_create(RHI_STAGE_VERTEX, &ss, err, sizeof err);
+     if (!g_vs) {
+         fprintf(stderr, "D3D8: VS compile failed: %s\n", err[0] ? err : "unknown");
+@@ -1110,6 +1126,11 @@
+     tsfp_texture_sync_bindings();
+ #endif
+     if (d3d8_vsh_prepare_draw(handle)) {
++#ifdef TSFP_OPENXR
++        if (tsfp_vk_stereo_geometry())
++            tsfp_vk_stereo_draw(d3d8_vsh_bound_pos_input() < 0 &&
++                                !d3d8_vsh_bound_projection_is_ortho());
++#endif
+         /* A program that never reads the projection's first column is
+          * placing vertices in screen coordinates it worked out itself; one
+          * that reads it but with an orthographic matrix in it is doing the
+@@ -1125,6 +1146,10 @@
+ #endif
+     } else {
+         ff_vs_prepare_draw(handle);
++#ifdef TSFP_OPENXR
++        if (tsfp_vk_stereo_geometry())
++            tsfp_vk_stereo_draw(!d3d8_fvf_transformed(handle));
++#endif
+         /* The fixed-function equivalent: pre-transformed vertices arrive
+          * already in screen pixels. Judged by the handle, which is the FVF
+          * here, the same one ff_vs_prepare_draw just laid the vertices out
+--- a/src/d3d/d3d8_vsh.c
++++ b/src/d3d/d3d8_vsh.c
+@@ -20,6 +20,10 @@
+ 
+ #include "graphics/point_size_shader.h"
+ #include "d3d8_internal.h"
++#ifdef TSFP_OPENXR
++#include "stereo_shader.h"
++#include "stereo_backend.h"
++#endif
+ #include <float.h>
+ #include <math.h>
+ #include "d3d8_vsh.h"
+@@ -731,8 +735,15 @@
+         "};\n"
+         "\n", NV2A_VS_MAX_CONSTANTS, NV2A_VS_MAX_INPUTS);
+ 
++#ifdef TSFP_OPENXR
++    sb_append(&sb, TSFP_XR_EYE_UNIFORMS);
++#endif
++
+     /* Input structure - only declare used inputs */
+     sb_append(&sb, "struct VS_IN {\n");
++#ifdef TSFP_OPENXR
++    sb_append(&sb, TSFP_XR_EYE_INPUT);
++#endif
+     for (i = 0; i < NV2A_VS_MAX_INPUTS; i++) {
+         if (inputs & (1u << i)) {
+             sb_append(&sb, "    float4 v%d : ATTR%d;\n", i, i);
+@@ -885,6 +896,10 @@
+         "        if (oPos.w == 0) oPos.w = 1;\n"
+         "        oPos.xyz *= oPos.w;\n"
+         "    }\n\n");
++
++#ifdef TSFP_OPENXR
++    sb_append(&sb, TSFP_XR_EYE_TRANSFORM("oPos"));
++#endif
+ 
+     /* Populate output structure */
+     sb_append(&sb,
+@@ -1151,6 +1166,9 @@
+     ss.name = "nv2a_vsh";
+     ss.entry = "main";
+     ss.target = "vs_5_0";
++#ifdef TSFP_OPENXR
++    ss.macros = tsfp_vk_stereo_macros();
++#endif
+     ss.optimize = 1;
+     {
+         long long started = d3d8_compile_clock();

@@ -1,0 +1,30 @@
+diff --git a/src/runtime/guest_kernel_boot.c b/src/runtime/guest_kernel_boot.c
+--- a/src/runtime/guest_kernel_boot.c
++++ b/src/runtime/guest_kernel_boot.c
+@@ -33,13 +33,16 @@
+ }
+ 
+ void xbox_kernel_init(void) {
+-    const char *value;
+     if(diagnostic_ready) return;
+     xbox_GuestLockInit();xbox_GuestLockEnter();xbox_GuestLiftedEnter();
+     xbox_hal_init_timers();
+     InitializeCriticalSection(&diagnostic_lock);
+     diagnostic_level=XBOX_LOG_INFO;
+-    value=getenv("XBOX_LOG_LEVEL");
++#ifdef TSFP_RELEASE
++    diagnostic_quiet=1;
++    diagnostic_file=NULL;
++#else
++    const char *value=getenv("XBOX_LOG_LEVEL");
+     if(value) {
+         long requested=strtol(value,NULL,10);
+         diagnostic_level=requested<XBOX_LOG_ERROR?XBOX_LOG_ERROR:
+@@ -47,6 +50,7 @@
+     }
+     value=getenv("TSFP_DEBUG_QUIET");diagnostic_quiet=value && !strcmp(value,"1");
+     diagnostic_file=diagnostic_quiet?NULL:fopen("xbox_kernel.log","w");
++#endif
+     diagnostic_ready=1;
+     xbox_log(XBOX_LOG_INFO,"THUNK","Project kernel services ready; imports use guest bridge dispatch");
+ }

@@ -1,0 +1,48 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -4377,9 +4377,18 @@
+                       (V.rt_depth && v->image == V.rt_depth->image)))
+                 v = NULL;
+ #ifdef TSFP_OPENXR
+-            /* Reuse the guest's 2D shader, with an eye-specific snapshot. */
++            /* Only the scoped effects may composite a scene copy back into
++             * the stereo scene. Other guest draws retain the stereo view. */
+             if ((V.view_mask || V.xr_effect_view_mask || V.xr_uplink_eye_mask) &&
+                 v && v->image->xr_frame_copy) {
++                if (!V.xr_effect_view_mask && !V.xr_uplink_eye_mask) {
++                    static int logged;
++                    if (!logged && !tsfp_stereo_screen_effect_draw()) {
++                        logged = 1;
++                        fprintf(stderr, "[XR-FX] Skipped an unscoped frame copy over the stereo scene\n");
++                    }
++                    return 0;
++                }
+                 if (!v->image->xr_frame_paired)
+                     return 0;
+                 if (V.xr_effect_view_mask == 2 || V.xr_uplink_eye_mask == 2)
+@@ -4720,13 +4729,10 @@
+ 
+ static int xr_effect_needs_eye_draws(void)
+ {
+-    if (V.xr_uplink_eye_mask || !V.xr_world_active || !V.ps || !V.rt_color)
++    if (!tsfp_stereo_screen_effect_draw() || V.xr_uplink_eye_mask ||
++        !V.xr_world_active || !V.ps || !V.rt_color)
+         return 0;
+-    const int world = xr_world_target();
+-    const int effect = tsfp_stereo_screen_effect_draw();
+-    if (!world && !effect)
+-        return 0;
+-    if (!world && V.rt_color->image->xr_frame_paired)
++    if (!xr_world_target() && V.rt_color->image->xr_frame_paired)
+         return 1;
+     for (uint32_t i = 0; i < V.ps->nb; ++i) {
+         const Refl *binding = &V.ps->b[i];
+@@ -4735,7 +4741,7 @@
+             continue;
+         RhiImage *image = V.tex[slot]->image;
+         if (image != V.rt_color->image &&
+-            (image->xr_frame_copy || (effect && image == V.xr_world_color)))
++            (image->xr_frame_copy || image == V.xr_world_color))
+             return 1;
+     }
+     return 0;

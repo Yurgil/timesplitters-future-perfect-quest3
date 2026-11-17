@@ -1,0 +1,251 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -298,6 +298,12 @@
+     Pipe                   **pipes;
+     uint32_t                 pipe_cap, npipes;
+     uint64_t                 next_id;
++#ifdef TSFP_OPENXR
++    RhiBuffer               *xr_held_constants[TSFP_AVATAR_HANDS];
++    unsigned                 xr_held_uploaded;
++    RhiBuffer               *xr_hud_constants;
++    int                      xr_hud_uploaded;
++#endif
+ 
+     /* dummies for what a draw leaves unbound */
+     RhiImage                *dummy_img[5];  /* 2D, 2D array, cube, 3D, 2D MS */
+@@ -1035,6 +1041,9 @@
+         } else {
+             V.xr_weapon_constants = v_buffer_create(&desc, identity);
+             V.xr_body_constants = v_buffer_create(&desc, identity);
++            for (unsigned hand = 0; hand < TSFP_AVATAR_HANDS; ++hand)
++                V.xr_held_constants[hand] = v_buffer_create(&desc, identity);
++            V.xr_hud_constants = v_buffer_create(&desc, identity);
+             for (unsigned role = TSFP_MODEL_LEFT_WEAPON; role < TSFP_MODEL_TRACKED_COUNT; ++role)
+                 V.xr_tracked_constants[role] = v_buffer_create(&desc, identity);
+         }
+@@ -1924,6 +1933,10 @@
+         if (V.xr_identity_constants) v_buffer_destroy(V.xr_identity_constants);
+         if (V.xr_weapon_constants) v_buffer_destroy(V.xr_weapon_constants);
+         if (V.xr_body_constants) v_buffer_destroy(V.xr_body_constants);
++        for (unsigned hand = 0; hand < TSFP_AVATAR_HANDS; ++hand)
++            if (V.xr_held_constants[hand])
++                v_buffer_destroy(V.xr_held_constants[hand]);
++        if (V.xr_hud_constants) v_buffer_destroy(V.xr_hud_constants);
+         for (unsigned role = TSFP_MODEL_LEFT_WEAPON; role < TSFP_MODEL_TRACKED_COUNT; ++role)
+             if (V.xr_tracked_constants[role])
+                 v_buffer_destroy(V.xr_tracked_constants[role]);
+@@ -2000,6 +2013,10 @@
+     SC.extent.height = h;
+     return recreate_swapchain();
+ }
++
++#ifdef TSFP_OPENXR
++static void xr_report_draw_counts(void);
++#endif
+ 
+ static void next_frame(void)
+ {
+@@ -2008,6 +2025,9 @@
+     V.xr_weapon_uploaded = 0;
+     V.xr_body_uploaded = 0;
+     V.xr_tracked_uploaded = 0;
++    V.xr_held_uploaded = 0;
++    V.xr_hud_uploaded = 0;
++    xr_report_draw_counts();
+ #endif
+     V.frame_no++;
+     upload_note_frame();
+@@ -3791,7 +3811,9 @@
+ #ifdef TSFP_OPENXR
+ static int xr_body_depth(void)
+ {
+-    return V.view_mask && tsfp_stereo_model_role() == TSFP_MODEL_BODY;
++    const TsfpModelRole role = tsfp_stereo_model_role();
++    return V.view_mask && (tsfp_model_role_on_body(role) ||
++        role == TSFP_MODEL_LEFT_WEAPON || role == TSFP_MODEL_RIGHT_WEAPON);
+ }
+ #endif
+ 
+@@ -3984,7 +4006,52 @@
+ }
+ 
+ #ifdef TSFP_OPENXR
++/* Which eye mapping the last draw took, for the per-frame counts. */
++static char xr_draw_kind;
++static unsigned xr_kind_counts[8];
++static const char xr_kinds[] = "ibhutwe";
++
++static void xr_count_draw(void)
++{
++    const char *kind = xr_draw_kind ? strchr(xr_kinds, xr_draw_kind) : NULL;
++    if (!kind)
++        return;
++    ++xr_kind_counts[kind - xr_kinds];
++}
++
++static void xr_report_draw_counts(void)
++{
++    const int any = xr_kind_counts[0] || xr_kind_counts[3] || xr_kind_counts[5] || xr_kind_counts[6];
++    if (any && V.frame_no % 900u == 0)
++        fprintf(stderr, "[6DoF] Draws per frame: identity %u, body %u, held %u, HUD %u, tracked %u, "
++                        "weapon lens %u, world %u\n", xr_kind_counts[0], xr_kind_counts[1],
++                xr_kind_counts[2], xr_kind_counts[3], xr_kind_counts[4], xr_kind_counts[5], xr_kind_counts[6]);
++    memset(xr_kind_counts, 0, sizeof xr_kind_counts);
++}
++
++static int xr_hud_draw(void)
++{
++    return V.view_mask && V.xr_world_active && V.xr_hud_constants &&
++        tsfp_stereo_model_role() == TSFP_MODEL_DEFAULT && tsfp_stereo_hud_draw();
++}
++
++static RhiBuffer *xr_draw_eye_constants_kind(void);
++
+ static RhiBuffer *xr_draw_eye_constants(void)
++{
++    RhiBuffer *buffer = xr_draw_eye_constants_kind();
++    xr_draw_kind = buffer == V.xr_identity_constants ? 'i' :
++                   buffer == V.xr_body_constants ? 'b' :
++                   buffer == V.xr_hud_constants ? 'u' :
++                   buffer == V.xr_weapon_constants ? 'w' :
++                   buffer == V.xr_eye_constants ? 'e' : 'h';
++    for (unsigned role = 0; role < TSFP_MODEL_TRACKED_COUNT; ++role)
++        if (buffer && buffer == V.xr_tracked_constants[role])
++            xr_draw_kind = 't';
++    return buffer;
++}
++
++static RhiBuffer *xr_draw_eye_constants_kind(void)
+ {
+     if (!V.view_mask || !V.xr_world_active)
+         return V.xr_identity_constants;
+@@ -3999,7 +4066,33 @@
+         }
+         return V.xr_body_uploaded ? V.xr_body_constants : V.xr_eye_constants;
+     }
++    if (role == TSFP_MODEL_LEFT_HELD || role == TSFP_MODEL_RIGHT_HELD) {
++        const unsigned hand = role == TSFP_MODEL_LEFT_HELD ? TSFP_AVATAR_LEFT : TSFP_AVATAR_RIGHT;
++        if (!(V.xr_held_uploaded & (1u << hand)) && V.xr_held_constants[hand]) {
++            float rows[32];
++            if (tsfp_stereo_held_matrices(hand, rows)) {
++                v_buffer_update(V.xr_held_constants[hand], rows);
++                V.xr_held_uploaded |= 1u << hand;
++            }
++        }
++        return V.xr_held_uploaded & (1u << hand) ? V.xr_held_constants[hand] : V.xr_eye_constants;
++    }
+     const int tracked_weapon = role >= TSFP_MODEL_LEFT_WEAPON && role < TSFP_MODEL_TRACKED_COUNT;
++    if (xr_hud_draw()) {
++        if (!V.xr_hud_uploaded) {
++            float rows[32];
++            if (!tsfp_xr_hud_matrices(rows))
++                return V.xr_identity_constants;
++            v_buffer_update(V.xr_hud_constants, rows);
++            V.xr_hud_uploaded = 1;
++            static int reported;
++            if (!reported) {
++                reported = 1;
++                fprintf(stderr, "[6DoF] Drawing the HUD on a head-locked panel\n");
++            }
++        }
++        return V.xr_hud_constants;
++    }
+     if (!V.xr_draw_world && !tracked_weapon)
+         return V.xr_identity_constants;
+     const float *projection = tsfp_stereo_weapon_projection();
+@@ -4013,8 +4106,10 @@
+                 static unsigned reported;
+                 if (!(reported & bit)) {
+                     reported |= bit;
+-                    fprintf(stderr, "[6DoF] Rendering tracked %s weapon\n",
+-                            role == TSFP_MODEL_LEFT_WEAPON ? "left" : "right");
++                    const int left = role == TSFP_MODEL_LEFT_WEAPON || role == TSFP_MODEL_LEFT_FLASH;
++                    const int flash = role == TSFP_MODEL_LEFT_FLASH || role == TSFP_MODEL_RIGHT_FLASH;
++                    fprintf(stderr, "[6DoF] Rendering tracked %s %s\n", left ? "left" : "right",
++                            flash ? "muzzle flash" : "first-person weapon");
+                 }
+             }
+         }
+@@ -4166,7 +4261,7 @@
+     /* The title's scissor is in its single camera's pixels. Applying it
+      * after the eye transform can cut a portal in one eye only. */
+     const TsfpModelRole role = tsfp_stereo_model_role();
+-    if (use_scissor && V.view_mask && (V.xr_draw_world || role != TSFP_MODEL_DEFAULT)) {
++    if (use_scissor && V.view_mask && (V.xr_draw_world || role != TSFP_MODEL_DEFAULT || xr_hud_draw())) {
+         static int logged_scissor;
+         if (!logged_scissor && (V.scissor.left > 0 || V.scissor.top > 0 ||
+             V.scissor.right < (int32_t)V.area.width || V.scissor.bottom < (int32_t)V.area.height)) {
+@@ -4215,6 +4310,9 @@
+             depth_cmp = VK_COMPARE_OP_LESS_OR_EQUAL;
+             stencil_test = VK_FALSE;
+         }
++        /* The panel floats in front of the world; nearer walls must not hide it. */
++        if (xr_hud_draw())
++            depth_test = depth_write = VK_FALSE;
+ #endif
+         struct { VkStencilOp fail, pass, depth_fail; VkCompareOp cmp; } front, back;
+         uint32_t read_mask = d->stencil_read_mask, write_mask = d->stencil_write_mask;
+@@ -4285,8 +4383,24 @@
+         }
+         return 0;
+     }
+-    if (role == TSFP_MODEL_HIDDEN || (role == TSFP_MODEL_BODY && !V.view_mask))
++    if (V.view_mask && V.xr_world_active && tsfp_stereo_screen_effect_draw()) {
++        static int reported;
++        if (!reported) {
++            reported = 1;
++            fprintf(stderr, "[6DoF] Suppressed the Xbox screen effects pass in stereo\n");
++        }
+         return 0;
++    }
++    if (V.view_mask && V.xr_world_active && tsfp_stereo_legacy_weapon_draw()) {
++        static int reported;
++        if (!reported) {
++            reported = 1;
++            fprintf(stderr, "[6DoF] Suppressed legacy weapon screen effects\n");
++        }
++        return 0;
++    }
++    if (role == TSFP_MODEL_HIDDEN || (tsfp_model_role_on_body(role) && !V.view_mask))
++        return 0;
+ #endif
+     p = find_pipeline();
+     if (!p || !p->pipe)
+@@ -4318,9 +4432,13 @@
+         if(V.compat12)vkCmdBindVertexBuffers(cb,0,1,&V.zero_b,&off);
+         else vkCmdBindVertexBuffers2(cb, 0, 1, &V.zero_b, &off, NULL, &stride);
+     }
++#ifdef TSFP_OPENXR
++    xr_draw_kind = 0;
++#endif
+     if (!push_descriptors(p))
+         return 0;
+ #ifdef TSFP_OPENXR
++    xr_count_draw();
+     if (role == TSFP_MODEL_BODY) {
+         static int reported_state;
+         if (!reported_state) {
+--- a/titles/futureperfect/src/recomp_manual.c
++++ b/titles/futureperfect/src/recomp_manual.c
+@@ -1362,6 +1362,21 @@
+ extern void sub_0001EFB0_gen(void);
+ void sub_0001EFB0(void)
+ {
++#ifdef TSFP_QUEST_STEREO_PROBE
++    extern int tsfp_xr_geometry_enabled(void);
++    const uint32_t rectangle_caller = FP_MEM32(g_esp);
++    if ((rectangle_caller == 0x0006F322u || rectangle_caller == 0x0006F34Bu ||
++         rectangle_caller == 0x0013970Eu || rectangle_caller == 0x0013972Eu) &&
++        tsfp_xr_geometry_enabled()) {
++        static int reported;
++        if (!reported) {
++            reported = 1;
++            fprintf(stderr, "[6DoF] Suppressed cinematic bars\n");
++        }
++        g_esp += sizeof(uint32_t);
++        return;
++    }
++#endif
+ #if defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
+     uint32_t frame = g_esp, caller = FP_MEM32(frame);
+     if (pc_display_transition_overlay(sub_0001EFB0_gen)) return;

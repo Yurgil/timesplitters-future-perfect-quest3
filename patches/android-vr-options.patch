@@ -1,0 +1,23 @@
+--- a/titles/futureperfect/src/recomp_manual.c
++++ b/titles/futureperfect/src/recomp_manual.c
+@@ -2147,6 +2147,9 @@ void sub_00079D60(void)
+ {
+ #if defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
+     pc_display_menu_button(sub_00079D60_gen);
++#elif defined(TSFP_QUEST_STEREO_PROBE)
++    extern void tsfp_quest_vr_menu_button(void (*original)(void));
++    tsfp_quest_vr_menu_button(sub_00079D60_gen);
+ #else
+     sub_00079D60_gen();
+ #endif
+@@ -2222,6 +2225,10 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
+ #if defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
+     recomp_func_t display_callback=pc_display_menu_lookup(xbox_va);
+     if(display_callback) return display_callback;
++#elif defined(TSFP_QUEST_STEREO_PROBE)
++    extern recomp_func_t tsfp_quest_vr_menu_lookup(uint32_t address);
++    recomp_func_t vr_callback = tsfp_quest_vr_menu_lookup(xbox_va);
++    if (vr_callback) return vr_callback;
+ #endif
+     /*
+      * TODO: Add your overrides here. Examples:

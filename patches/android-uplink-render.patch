@@ -1,0 +1,31 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -1081,6 +1081,12 @@
+     }
+ }
+ 
++int tsfp_vk_uplink_world_bound(void)
++{
++    return V.xr_world_active && V.rt_color && V.rt_color->image == V.xr_world_color &&
++        V.rt_color->xr_array && V.rt_depth && V.rt_depth->xr_array;
++}
++
+ const RhiMacro *tsfp_vk_stereo_macros(void)
+ {
+     static const RhiMacro macros[] = { { "TSFP_STEREO_GEOMETRY", "1" }, { NULL, NULL } };
+@@ -1566,6 +1572,7 @@
+     RHI_VK_VS_UNIFORM_BASE + 3, RHI_VK_VS_UNIFORM_BASE + 7,
+ #ifdef TSFP_OPENXR
+     RHI_VK_VS_UNIFORM_BASE + TSFP_XR_EYE_UBO_SLOT,
++    RHI_VK_VS_UNIFORM_BASE + TSFP_UPLINK_UBO_SLOT,
+ #endif
+     RHI_VK_PS_UNIFORM_BASE + 0, RHI_VK_PS_UNIFORM_BASE + 1, RHI_VK_PS_UNIFORM_BASE + 7,
+ };
+@@ -1928,6 +1935,7 @@
+     vkDeviceWaitIdle(V.dev);
+ #ifdef TSFP_OPENXR
+     if (tsfp_xr_enabled()) {
++        tsfp_uplink_render_destroy();
+         tsfp_xr_destroy();
+         if (V.xr_eye_constants) v_buffer_destroy(V.xr_eye_constants);
+         if (V.xr_identity_constants) v_buffer_destroy(V.xr_identity_constants);

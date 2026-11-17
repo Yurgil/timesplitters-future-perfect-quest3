@@ -1,0 +1,216 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -152,6 +152,7 @@
+     VkImageView  view;
+ #ifdef TSFP_OPENXR
+     VkImageView  xr_array;
++    VkImageView  xr_right;
+ #endif
+     VkImageViewType type;
+     uint32_t     base_mip, base_layer, layers;
+@@ -284,6 +285,7 @@
+ #ifdef TSFP_OPENXR
+     RhiImage                *xr_world_color;
+     uint32_t                 xr_effect_view_mask;
++    uint32_t                 xr_uplink_eye_mask;
+     RhiBuffer               *xr_eye_constants, *xr_identity_constants;
+     RhiBuffer               *xr_weapon_constants;
+     RhiBuffer               *xr_body_constants;
+@@ -1130,7 +1132,8 @@
+ 
+ static int xr_fullscreen_draw(void)
+ {
+-    return V.view_mask && (V.xr_effect_view_mask || tsfp_stereo_screen_effect_draw());
++    return V.view_mask && (V.xr_effect_view_mask || V.xr_uplink_eye_mask ||
++                           tsfp_stereo_screen_effect_draw());
+ }
+ #endif
+ 
+@@ -1154,6 +1157,8 @@
+         dv = d->view;
+     uint32_t view_mask = 0;
+ #ifdef TSFP_OPENXR
++    if (d && V.xr_uplink_eye_mask == 2 && d->xr_right)
++        dv = d->xr_right;
+     VkMultisampledRenderToSingleSampledInfoEXT msaa = {
+         .sType = VK_STRUCTURE_TYPE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_INFO_EXT,
+         .multisampledRenderToSingleSampledEnable = VK_TRUE,
+@@ -1183,7 +1188,8 @@
+             cv = c->xr_array;
+             if (d)
+                 dv = d->xr_array;
+-            view_mask = V.xr_effect_view_mask ? V.xr_effect_view_mask : 3;
++            view_mask = V.xr_uplink_eye_mask ? V.xr_uplink_eye_mask :
++                        V.xr_effect_view_mask ? V.xr_effect_view_mask : 3;
+             if (!logged_pass) {
+                 logged_pass = 1;
+                 fprintf(stderr, "[M4] Scene render pass using two color/depth layers\n");
+@@ -1193,7 +1199,7 @@
+ #endif
+ #ifdef TSFP_OPENXR
+     if (c && c->image != V.xr_world_color)
+-        c->image->xr_frame_paired = 0;
++        c->image->xr_frame_copy = c->image->xr_frame_paired = 0;
+ #endif
+     if (c) {
+         w = c->width;
+@@ -2856,6 +2862,12 @@
+         eye_view.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+         eye_view.subresourceRange.layerCount = 2;
+         vkCreateImageView(V.dev, &eye_view, NULL, &v->xr_array);
++    }
++    if (img->xr_layers && ci.viewType == VK_IMAGE_VIEW_TYPE_2D &&
++        ci.subresourceRange.baseArrayLayer == 0) {
++        VkImageViewCreateInfo right_view = ci;
++        right_view.subresourceRange.baseArrayLayer = 1;
++        vkCreateImageView(V.dev, &right_view, NULL, &v->xr_right);
+     }
+ #endif
+     v->type = ci.viewType;
+@@ -2883,6 +2895,7 @@
+             V.tex[i] = NULL;
+ #ifdef TSFP_OPENXR
+     if (v->xr_array) trash(T_VIEW, (uint64_t)v->xr_array, NULL);
++    if (v->xr_right) trash(T_VIEW, (uint64_t)v->xr_right, NULL);
+ #endif
+     trash(T_VIEW, (uint64_t)v->view, NULL);
+     v_image_destroy(v->image);
+@@ -2962,12 +2975,21 @@
+ static uint32_t clear_view_layers(const RhiView *v)
+ {
+ #ifdef TSFP_OPENXR
+-    if (v->xr_array)
++    if (v->xr_array && !V.xr_uplink_eye_mask)
+         return 2;
+ #endif
+     return v->layers ? v->layers : 1;
+ }
+ 
++static uint32_t clear_view_base_layer(const RhiView *v)
++{
++#ifdef TSFP_OPENXR
++    if (v->xr_array && V.xr_uplink_eye_mask == 2)
++        return 1;
++#endif
++    return v->base_layer;
++}
++
+ static void v_clear_color(RhiView *v, const float *rgba)
+ {
+     if (!v || v->kind != RHI_VIEW_RENDER_TARGET)
+@@ -2977,7 +2999,7 @@
+                 V.rt_color == v ? "bound" : "not bound", rgba[0], rgba[1], rgba[2], rgba[3]);
+     if (clear_in_scope(v, VK_IMAGE_ASPECT_COLOR_BIT, rgba, 0.0f, 0))
+         return;
+-    clear_image(v->image, v->base_mip, 1, v->base_layer, clear_view_layers(v),
++    clear_image(v->image, v->base_mip, 1, clear_view_base_layer(v), clear_view_layers(v),
+                 VK_IMAGE_ASPECT_COLOR_BIT, rgba, 0.0f, 0);
+ }
+ 
+@@ -2994,7 +3016,7 @@
+         return;
+     if (clear_in_scope(v, aspect, NULL, z, s))
+         return;
+-    clear_image(v->image, v->base_mip, 1, v->base_layer, clear_view_layers(v),
++    clear_image(v->image, v->base_mip, 1, clear_view_base_layer(v), clear_view_layers(v),
+                 aspect, NULL, z, s);
+ }
+ 
+@@ -4322,10 +4344,10 @@
+                 v = NULL;
+ #ifdef TSFP_OPENXR
+             /* Reuse the guest's 2D shader, with an eye-specific snapshot. */
+-            if (V.view_mask && v && v->image->xr_frame_copy) {
++            if ((V.view_mask || V.xr_uplink_eye_mask) && v && v->image->xr_frame_copy) {
+                 if (!v->image->xr_frame_paired)
+                     return 0;
+-                if (V.xr_effect_view_mask == 2)
++                if (V.xr_effect_view_mask == 2 || V.xr_uplink_eye_mask == 2)
+                     v = v->image->xr_right_frame;
+             }
+ #endif
+@@ -4340,6 +4362,13 @@
+                 return 0;
+             ii[n].sampler = VK_NULL_HANDLE;
+             ii[n].imageView = v->view;
++#ifdef TSFP_OPENXR
++            if (V.xr_uplink_eye_mask == 2 && v->image == V.xr_world_color) {
++                if (!v->xr_right)
++                    return 0;
++                ii[n].imageView = v->xr_right;
++            }
++#endif
+             ii[n].imageLayout = v->image->steady;
+             w[n].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+             w[n].pImageInfo = &ii[n];
+@@ -4414,7 +4443,7 @@
+     /* The title's scissor is in its single camera's pixels. Applying it
+      * after the eye transform can cut a portal in one eye only. */
+     const TsfpModelRole role = tsfp_stereo_model_role();
+-    if (use_scissor && fullscreen)
++    if (use_scissor && fullscreen && !V.xr_uplink_eye_mask)
+         use_scissor = 0;
+     if (use_scissor && V.view_mask && (V.xr_draw_world || role != TSFP_MODEL_DEFAULT || xr_hud_draw())) {
+         static int logged_scissor;
+@@ -4586,6 +4615,13 @@
+         return 0;
+ #ifdef TSFP_OPENXR
+     xr_count_draw();
++    if (V.xr_uplink_eye_mask && V.view_mask) {
++        static unsigned reported;
++        if (!(reported & V.view_mask)) {
++            reported |= V.view_mask;
++            fprintf(stderr, "[XR] Submitted the original SmartLink effect for eye mask %u\n", V.view_mask);
++        }
++    }
+     if (role == TSFP_MODEL_BODY) {
+         static int reported_state;
+         if (!reported_state) {
+@@ -4604,7 +4640,7 @@
+ #ifdef TSFP_OPENXR
+ static int xr_uses_frame_copy(void)
+ {
+-    if (!V.xr_world_active || !xr_world_target() || !V.ps)
++    if (V.xr_uplink_eye_mask || !V.xr_world_active || !xr_world_target() || !V.ps)
+         return 0;
+     for (uint32_t i = 0; i < V.ps->nb; ++i) {
+         const Refl *binding = &V.ps->b[i];
+@@ -4722,36 +4758,10 @@
+     return V.xr_world_active && xr_world_target() ? V.xr_world_color : NULL;
+ }
+ 
+-int tsfp_vk_uplink_copy(RhiImage *destination, const RhiBox boxes[2])
++void tsfp_vk_uplink_eye(unsigned mask)
+ {
+-    RhiImage *source = tsfp_vk_uplink_source();
+-    if (!source || !destination || source == destination || source->format != destination->format ||
+-        source->desc.samples != 1 || destination->desc.samples != 1 || destination->desc.depth != 2 ||
+-        source->desc.width != destination->desc.width || source->desc.height != destination->desc.height)
+-        return 0;
+-    VkImageCopy regions[2];
+-    unsigned count = 0;
+-    for (unsigned eye = 0; eye < 2; ++eye) {
+-        const RhiBox *box = &boxes[eye];
+-        if (box->right > source->desc.width || box->bottom > source->desc.height ||
+-            box->left >= box->right || box->top >= box->bottom)
+-            continue;
+-        const VkImageSubresourceLayers layer = {VK_IMAGE_ASPECT_COLOR_BIT, 0, eye, 1};
+-        const VkOffset3D offset = {(int32_t)box->left, (int32_t)box->top, 0};
+-        regions[count++] = (VkImageCopy){layer, offset, layer, offset,
+-            {box->right - box->left, box->bottom - box->top, 1}};
+-    }
+-    if (!count)
+-        return 0;
+     end_rendering();
+-    const VkImageLayout restore = source->layout;
+-    to_layout(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+-    to_layout(destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+-    vkCmdCopyImage(cmd(), image_handle(source), source->layout, image_handle(destination),
+-                   destination->layout, count, regions);
+-    to_layout(source, restore);
+-    to_layout(destination, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+-    return 1;
++    V.xr_uplink_eye_mask = mask;
+ }
+ 
+ void tsfp_vk_shield_capture(unsigned stage)

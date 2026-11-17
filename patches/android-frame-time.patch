@@ -1,0 +1,318 @@
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -483,9 +483,8 @@
+     }
+ }
+ 
+-static void frame_counters_tick(void)
++static void frame_counters_tick(DWORD now)
+ {
+-    DWORD now = GetTickCount();
+     int i;
+ 
+     if (!g_frame_counter_count)
+@@ -837,11 +836,10 @@
+     return s_fb_va;
+ }
+ 
+-static void framebuffer_probe_tick(void)
++static void framebuffer_probe_tick(DWORD now)
+ {
+     static DWORD last_ms;
+     static uint32_t last_sum;
+-    DWORD now = GetTickCount();
+     uint32_t sum = 0, nonzero = 0, i, n;
+     const uint32_t *p;
+ 
+@@ -878,13 +876,13 @@
+  * the old spin). The cost is that the first wait after a quiet spell -- the
+  * first kickoff after a vblank wait, say -- can be answered up to that much
+  * later. */
+-static void nv2a_ack_wait(void)
++static void nv2a_ack_wait(LONGLONG ticks)
+ {
+     static int      idle_us = -1;
+     static HANDLE   timer;
+     static LONG     seen;
+     static LONGLONG quiet_since, qpf;
+-    LARGE_INTEGER   now, due;
++    LARGE_INTEGER   due;
+ 
+     if (idle_us < 0) {
+         const char *v = getenv("RECOMP_NV2A_ACK_IDLE_US");
+@@ -911,12 +909,11 @@
+         Sleep(0);
+         return;
+     }
+-    QueryPerformanceCounter(&now);
+     if (g_ack_activity != seen) {
+         seen = g_ack_activity;
+-        quiet_since = now.QuadPart;
++        quiet_since = ticks;
+     }
+-    if (now.QuadPart - quiet_since < qpf / 1000) {
++    if (ticks - quiet_since < qpf / 1000) {
+         Sleep(0);   /* busy: a waiter is spinning on another core */
+         return;
+     }
+@@ -944,7 +941,16 @@
+ {
+     volatile uint32_t *regs = (volatile uint32_t *)param;
+     xbox_NameCurrentThread(L"nv2a ack");
+-    while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
++    for (;;) {
++#if defined(__ANDROID__)
++        if (__atomic_load_n(&g_nv2a_ack_stop, __ATOMIC_ACQUIRE))
++            break;
++        const LONG vblank_owns_intr = __atomic_load_n(&s_vblank_owns_intr, __ATOMIC_ACQUIRE);
++#else
++        if (InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0))
++            break;
++        const LONG vblank_owns_intr = InterlockedCompareExchange(&s_vblank_owns_intr, 0, 0);
++#endif
+         for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
+             volatile uint32_t *r =
+                 (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
+@@ -967,8 +973,7 @@
+              *
+              * The ISR clears them itself, which is what write-1-to-clear is
+              * for; this thread stops competing with it. */
+-            if (InterlockedCompareExchange(&s_vblank_owns_intr, 0, 0)
+-                && intr_status_reg(NV2A_ACK[i].offset))
++            if (vblank_owns_intr && intr_status_reg(NV2A_ACK[i].offset))
+                 continue;
+ 
+             if (*r & NV2A_ACK[i].busy_mask) {
+@@ -996,8 +1001,16 @@
+         }
+         fence_mirrors_tick();
+         counter_mirrors_tick();
+-        frame_counters_tick();
+-        framebuffer_probe_tick();
++        LARGE_INTEGER ticks;
++        QueryPerformanceCounter(&ticks);
++#if defined(__ANDROID__)
++        /* The POSIX performance counter and GetTickCount share CLOCK_MONOTONIC. */
++        const DWORD now_ms = (DWORD)(ticks.QuadPart / 1000000);
++#else
++        const DWORD now_ms = GetTickCount();
++#endif
++        frame_counters_tick(now_ms);
++        framebuffer_probe_tick(now_ms);
+ 
+         /* Which framebuffer the display would be scanning out.
+          *
+@@ -1017,7 +1030,6 @@
+              * is being drawn and the missing piece is upstream of the GPU. */
+             static DWORD  last_put_ms;
+             static uint32_t last_put;
+-            DWORD now_ms = GetTickCount();
+             uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
+             if (put != last_put || (now_ms - last_put_ms) > 2000) {
+                 /* Survey the segment the title just submitted, once. */
+@@ -1067,8 +1079,8 @@
+                     fprintf(stderr, "  [NV2A] DMA_PUT = 0x%08X  DMA_GET = "
+                             "0x%08X%s\n", put, g,
+                             g == put ? "" : "  (GPU behind)");
++                    fflush(stderr);
+                 }
+-                fflush(stderr);
+             }
+         }
+         if (s_nv2a_trace) {
+@@ -1096,9 +1108,9 @@
+          * hardware whether or not anyone is asleep. GetTickCount() shares the
+          * millisecond unit, so the rate matches. */
+         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
+-                               + g_memory_offset) = GetTickCount();
++                               + g_memory_offset) = now_ms;
+ 
+-        nv2a_ack_wait();
++        nv2a_ack_wait(ticks.QuadPart);
+     }
+     return 0;
+ }
+--- a/src/platform/win32_compat.c
++++ b/src/platform/win32_compat.c
+@@ -517,9 +517,28 @@
+ {
+     w32_object *o = (w32_object *)h;
+     struct timespec now;
+-    uint64_t end, current;
+     DWORD result = WAIT_TIMEOUT;
+     if (!o || o->kind != K_EVENT) return WAIT_FAILED;
++#ifdef __ANDROID__
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    now.tv_sec += microseconds / 1000000u;
++    now.tv_nsec += (long)(microseconds % 1000000u) * 1000;
++    if (now.tv_nsec >= 1000000000L) {
++        ++now.tv_sec;
++        now.tv_nsec -= 1000000000L;
++    }
++    pthread_mutex_lock(&o->lock);
++    while (!o->signaled) {
++        const int rc = pthread_cond_timedwait_monotonic_np(&o->cond, &o->lock, &now);
++        if (rc != 0)
++            break;
++    }
++    if (o->signaled) {
++        if (!o->manual_reset) o->signaled = 0;
++        result = WAIT_OBJECT_0;
++    }
++#else
++    uint64_t end, current;
+     clock_gettime(CLOCK_MONOTONIC, &now);
+     end = (uint64_t)now.tv_sec * 1000000000ull + now.tv_nsec +
+           (uint64_t)microseconds * 1000ull;
+@@ -548,6 +567,7 @@
+         pthread_cond_timedwait(&o->cond, &o->lock, &now);
+ #endif
+     }
++#endif
+     pthread_mutex_unlock(&o->lock);
+     return result;
+ }
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -293,6 +293,8 @@
+     int                      xr_body_uploaded;
+     unsigned                 xr_tracked_uploaded;
+ #endif
++
++    Pipe                    *last_pipeline;
+ 
+     Trash                   *trash;
+     uint32_t                 ntrash, trash_cap;
+@@ -507,10 +509,9 @@
+         V.completed = v;
+ }
+ 
+-static void trash_collect(void)
++static void trash_collect_completed(void)
+ {
+     uint32_t i, k = 0;
+-    update_completed();
+     for (i = 0; i < V.ntrash; i++) {
+         if (V.trash[i].serial <= V.completed)
+             destroy_now(&V.trash[i]);
+@@ -520,6 +521,12 @@
+     V.ntrash = k;
+ }
+ 
++static void trash_collect(void)
++{
++    update_completed();
++    trash_collect_completed();
++}
++
+ /* Opt-in cumulative diagnostics; no file or extra clock queries normally. */
+ static struct {
+     uint64_t image_updates,image_bytes,copy_calls,uniform_updates,uniform_skips;
+@@ -574,10 +581,25 @@
+     wi.semaphoreCount = 1;
+     wi.pSemaphores = &V.timeline;
+     wi.pValues = &s;
+-    uint64_t start=upload_profile_enabled()?upload_clock_ns():0;
+-    vkWaitSemaphores(V.dev, &wi, UINT64_MAX);
+-    if(upload_profile_enabled()){upload_metrics.wait_calls++;upload_metrics.wait_ns+=upload_clock_ns()-start;}
+-    update_completed();
++    const int profile = upload_profile_enabled();
++#if defined(TSFP_OPENXR)
++    const uint64_t start = (profile || tsfp_xr_enabled()) ? upload_clock_ns() : 0;
++#else
++    const uint64_t start = profile ? upload_clock_ns() : 0;
++#endif
++    if (vkWaitSemaphores(V.dev, &wi, UINT64_MAX) == VK_SUCCESS)
++        V.completed = s;
++    if (start) {
++        const uint64_t elapsed = upload_clock_ns() - start;
++        if (profile) {
++            upload_metrics.wait_calls++;
++            upload_metrics.wait_ns += elapsed;
++        }
++#ifdef TSFP_OPENXR
++        if (tsfp_xr_enabled())
++            tsfp_xr_add_gpu_wait(elapsed);
++#endif
++    }
+ }
+ 
+ /* ---- memory ------------------------------------------------------------------------ */
+@@ -1286,7 +1308,10 @@
+         const char *v = getenv("RECOMP_VK_TRACE");
+         limit = !env_on("RECOMP_VK_TRACE") ? 0 : atoi(v) > 1 ? atoi(v) : 400;
+     }
+-    return lines++ < limit;
++    if (lines >= limit)
++        return 0;
++    ++lines;
++    return 1;
+ }
+ 
+ static int create_instance(int want_validation)
+@@ -2093,10 +2118,13 @@
+     V.frame_no++;
+     upload_note_frame();
+     V.fi = (V.fi + 1) % FRAMES;
++    /* Refresh completion once before waiting. A successful wait already
++     * establishes a completion floor for the ring and deferred destruction. */
++    update_completed();
+     wait_serial(V.frames[V.fi].last_serial);
+     V.frames[V.fi].ring.cur = 0;
+     V.frames[V.fi].ring.off = 0;
+-    trash_collect();
++    trash_collect_completed();
+ }
+ 
+ #ifdef TSFP_OPENXR
+@@ -2156,6 +2184,7 @@
+         submit(VK_NULL_HANDLE);
+     int32_t result = tsfp_xr_end_frame();
+     next_frame();
++    tsfp_xr_report_frame_timing();
+     return result;
+ }
+ #endif
+@@ -3583,14 +3612,19 @@
+ 
+ static uint64_t hash_key(const PipeKey *k)
+ {
++    _Static_assert(sizeof(PipeKey) % sizeof(uint64_t) == 0, "whole words in pipeline key");
+     const uint8_t *p = (const uint8_t *)k;
+     uint64_t h = 1469598103934665603ull;
+-    size_t i;
+-    for (i = 0; i < sizeof *k; i++) {
+-        h ^= p[i];
++    for (size_t i = 0; i < sizeof *k; i += sizeof(uint64_t)) {
++        uint64_t word;
++        memcpy(&word, p + i, sizeof word);
++        h ^= word;
+         h *= 1099511628211ull;
+     }
+-    return h;
++    /* Spread the high bits of shader IDs and state words into the bucket. */
++    h ^= h >> 33;
++    h *= UINT64_C(0xff51afd7ed558ccd);
++    return h ^ (h >> 33);
+ }
+ 
+ static Pipe **pipe_slot(const PipeKey *k)
+@@ -3936,6 +3970,8 @@
+     }
+     if (!k.color)
+         memset(&k.blend, 0, sizeof k.blend);
++    if (V.last_pipeline && memcmp(&V.last_pipeline->key, &k, sizeof k) == 0)
++        return V.last_pipeline;
+     if (V.npipes * 10 >= V.pipe_cap * 7 && !pipes_grow())
+         return NULL;
+     s = pipe_slot(&k);
+@@ -3963,7 +3999,8 @@
+             }
+         }
+     }
+-    return *s;
++    V.last_pipeline = *s;
++    return V.last_pipeline;
+ }
+ 
+ /* ---- drawing ------------------------------------------------------------------------------------------------ */

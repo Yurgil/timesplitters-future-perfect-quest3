@@ -1,0 +1,135 @@
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -26,6 +26,9 @@
+  */
+ 
+ #include "kernel.h"
++#ifdef TSFP_QUEST_HITCH_TRACE
++#include "hitch_trace.h"
++#endif
+ #ifndef _WIN32
+ #include "guest_mmio_interrupt.h"
+ #endif
+@@ -1256,8 +1259,14 @@
+     if (bridge_wait_on_self(STACK_ARG(0), alertable, timeout_ptr))
+         return;
+ 
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_BEGIN(wait_start);
++#endif
+     g_eax = (uint32_t)xbox_NtWaitForSingleObject(
+         handle, (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_END(wait_start, 50, "NtWaitForSingleObject token=%08x status=%08x", STACK_ARG(0), g_eax);
++#endif
+ }
+ 
+ /* ── NtClearEvent (ordinal 186) ──────────────────────────── */
+@@ -1318,9 +1327,15 @@
+     if (bridge_wait_on_self(STACK_ARG(0), alertable, timeout_ptr))
+         return;
+ 
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_BEGIN(wait_start);
++#endif
+     g_eax = (uint32_t)xbox_NtWaitForSingleObjectEx(
+         handle, (KPROCESSOR_MODE)wait_mode, (BOOLEAN)alertable,
+         XBOX_TO_NATIVE(timeout_ptr));
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_END(wait_start, 50, "NtWaitForSingleObjectEx token=%08x status=%08x", STACK_ARG(0), g_eax);
++#endif
+ 
+     /* The status, not just the arguments.
+      *
+@@ -1423,9 +1438,15 @@
+         }
+     }
+ 
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_BEGIN(wait_start);
++#endif
+     g_eax = (uint32_t)xbox_NtWaitForMultipleObjectsEx(
+         count, handles, wait_type, (BOOLEAN)alertable,
+         XBOX_TO_NATIVE(timeout_ptr));
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_END(wait_start, 50, "NtWaitForMultipleObjectsEx count=%u status=%08x", count, g_eax);
++#endif
+ }
+ 
+ /*
+@@ -3016,6 +3037,9 @@
+     LARGE_INTEGER  off = {0};
+     PLARGE_INTEGER poff = NULL;
+ 
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_BEGIN(read_start);
++#endif
+     memset(&ios, 0, sizeof(ios));
+     if (offset_va) {
+         off.LowPart  = BRIDGE_MEM32(offset_va);
+@@ -3117,6 +3141,10 @@
+          * opposite -- its stream reader only accepts a short count on the
+          * pending path -- so this is a switch, not a change. */
+     }
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_END(read_start, 8, "NtReadFile token=%08x bytes=%u offset=%lld status=%08x",
++                   STACK_ARG(0), length, (long long)off.QuadPart, g_eax);
++#endif
+ }
+ 
+ /* ── NtWriteFile (ordinal 236, 8 args = 32 bytes) ─────── */
+--- a/src/kernel/kernel_file.c
++++ b/src/kernel/kernel_file.c
+@@ -16,6 +16,9 @@
+ 
+ #define _GNU_SOURCE   /* FNM_CASEFOLD */
+ #include "kernel.h"
++#ifdef TSFP_QUEST_HITCH_TRACE
++#include "hitch_trace.h"
++#endif
+ #include <string.h>
+ #include <stdio.h>
+ 
+@@ -952,7 +955,15 @@
+     if (ByteOffset && ByteOffset->QuadPart >= 0)
+         lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
+ 
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_BEGIN(hitch_start);
++#endif
+     ssize_t n = read(fd, Buffer, Length);
++#ifdef TSFP_QUEST_HITCH_TRACE
++    const int read_errno = errno;
++    TSFP_HITCH_END(hitch_start, 4, "host read fd=%d bytes=%u", fd, Length);
++    errno = read_errno;
++#endif
+     if (n < 0) {
+         XBOX_TRACE(XBOX_LOG_FILE, "NtReadFile(handle=%p) errno=%d", FileHandle, errno);
+         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
+--- a/src/hle/hle_d3d8.c
++++ b/src/hle/hle_d3d8.c
+@@ -66,6 +66,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include "hle.h"
++#ifdef TSFP_QUEST_HITCH_TRACE
++#include "hitch_trace.h"
++#endif
+ #include "recomp_config.h"
+ #include "pc_native_rate.h"
+ #ifdef TSFP_PC_CONTROLS
+@@ -2371,6 +2374,14 @@
+         QueryPerformanceCounter(&t2);
+         g_swap_gate_ticks += t1.QuadPart - t0.QuadPart;
+         g_swap_body_ticks += t2.QuadPart - t1.QuadPart;
++#ifdef TSFP_QUEST_HITCH_TRACE
++        if (g_swap_last.QuadPart) {
++            TSFP_HITCH_SPAN(g_swap_last.QuadPart, t2.QuadPart, 50,
++                            "game frame before swap %.2f ms, gate %.2f ms, swap %.2f ms",
++                            (t0.QuadPart - g_swap_last.QuadPart) / 1e6,
++                            (t1.QuadPart - t0.QuadPart) / 1e6, (t2.QuadPart - t1.QuadPart) / 1e6);
++        }
++#endif
+         g_swap_last = t2;
+         g_swap_timed++;
+     }

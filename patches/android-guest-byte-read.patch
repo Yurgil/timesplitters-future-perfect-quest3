@@ -1,0 +1,65 @@
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -12,6 +12,10 @@
+  * 4. Set memory protection (read-only for .rdata)
+  */
+ 
++#if defined(__ANDROID__) && !defined(_GNU_SOURCE)
++#define _GNU_SOURCE
++#endif
++
+ #include "xbox_memory_layout.h"
+ #include "guest_image.h"
+ #include "guest_map_layout.h"
+@@ -42,6 +46,11 @@
+ #include <string.h>
+ #include <setjmp.h>
+ 
++#ifdef __ANDROID__
++#include <errno.h>
++#include <sys/uio.h>
++#endif
++
+ #if !defined(_WIN32)
+ #include <unistd.h>   /* _exit */
+ #endif
+@@ -1832,6 +1841,23 @@
+     return base && address >= begin && address - begin <= size &&
+         bytes <= size - (address - begin);
+ }
++#ifdef __ANDROID__
++/* The RTL lock path validates a single readable byte for its identity.
++ * Query it without scanning /proc/self/maps. The syscall honors the current
++ * page permissions, including changes made since the previous lock call. */
++static int guest_vm_readable_byte(uintptr_t address)
++{
++    unsigned char byte;
++    const struct iovec local = { &byte, 1 };
++    const struct iovec remote = { (void *)address, 1 };
++    const int saved_errno = errno;
++    const ssize_t result = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
++    const int inaccessible = result < 0 && errno == EFAULT;
++    errno = saved_errno;
++    return result == 1 ? 1 : inaccessible ? 0 : -1;
++}
++#endif
++
+ static void *guest_vm_resolve(void *host, uint32_t address, uint32_t bytes, int access)
+ {
+     uintptr_t native, cursor, end;
+@@ -1851,6 +1877,15 @@
+     /* Mapped-only admission permits restoring access. The host mapping owner
+      * keeps these windows alive; no guest reads occur in that case. */
+     if (access < 0) return (void *)native;
++#ifdef __ANDROID__
++    if (access == 0 && bytes == 1) {
++        int readable = guest_vm_readable_byte(native);
++        if (readable >= 0)
++            return readable ? (void *)native : NULL;
++        /* A syscall restriction or other transient failure uses the existing
++         * protection lookup. The known guest-window check above still applies. */
++    }
++#endif
+     cursor = native; end = native + bytes;
+     while (cursor < end) {
+         size_t available = pc_guest_region(cursor, access != 0);

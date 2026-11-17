@@ -1,0 +1,314 @@
+--- a/src/d3d/d3d8_screencopy.c
++++ b/src/d3d/d3d8_screencopy.c
+@@ -280,6 +280,17 @@
+         rhi_view_destroy(rtv);
+         return E_FAIL;
+     }
++#ifdef TSFP_OPENXR
++    const int full_frame = !source && !src && tex->width == d3d8_GetGuestWidth() &&
++                           tex->height == d3d8_GetGuestHeight();
++    if (full_frame && tsfp_vk_stereo_snapshot(dst_image)) {
++        rhi_view_destroy(rtv);
++        if (!d3d8_msaa_image_written(dst_image, 0)) return E_FAIL;
++        tex->screen_copy = TRUE;
++        g.copies++;
++        return S_OK;
++    }
++#endif
+     rhi_output_save(&saved);
+     if (!source) probe_source(&saved, tex, back_w, back_h);
+ 
+@@ -359,8 +370,7 @@
+      * the whole of it; see d3d8_draw_escapes_squeeze. */
+     tex->screen_copy = source == NULL;
+ #ifdef TSFP_OPENXR
+-    tsfp_vk_stereo_frame_copy(dst_image, !source && !src &&
+-        tex->width == d3d8_GetGuestWidth() && tex->height == d3d8_GetGuestHeight());
++    tsfp_vk_stereo_frame_copy(dst_image, full_frame);
+ #endif
+     return S_OK;
+ }
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -136,6 +136,8 @@
+ #ifdef TSFP_OPENXR
+     int                xr_layers;
+     int                xr_frame_copy, xr_msaa;
++    RhiView           *xr_right_frame;
++    int                xr_frame_paired;
+ #endif
+     VkFormat           format;
+     VkImageAspectFlags aspect;
+@@ -281,6 +283,7 @@
+     uint32_t                 view_mask;
+ #ifdef TSFP_OPENXR
+     RhiImage                *xr_world_color;
++    uint32_t                 xr_effect_view_mask;
+     RhiBuffer               *xr_eye_constants, *xr_identity_constants;
+     RhiBuffer               *xr_weapon_constants;
+     RhiBuffer               *xr_body_constants;
+@@ -1118,6 +1121,19 @@
+ }
+ #endif
+ 
++#ifdef TSFP_OPENXR
++static int xr_world_target(void)
++{
++    return V.rt_color && V.rt_color->image == V.xr_world_color && V.rt_color->xr_array &&
++           (!V.rt_depth || V.rt_depth->xr_array);
++}
++
++static int xr_fullscreen_draw(void)
++{
++    return V.view_mask && (V.xr_effect_view_mask || tsfp_stereo_screen_effect_draw());
++}
++#endif
++
+ static int begin_rendering(void)
+ {
+     VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+@@ -1167,13 +1183,17 @@
+             cv = c->xr_array;
+             if (d)
+                 dv = d->xr_array;
+-            view_mask = 3;
++            view_mask = V.xr_effect_view_mask ? V.xr_effect_view_mask : 3;
+             if (!logged_pass) {
+                 logged_pass = 1;
+                 fprintf(stderr, "[M4] Scene render pass using two color/depth layers\n");
+             }
+         }
+     }
++#endif
++#ifdef TSFP_OPENXR
++    if (c && c->image != V.xr_world_color)
++        c->image->xr_frame_paired = 0;
+ #endif
+     if (c) {
+         w = c->width;
+@@ -2539,6 +2559,7 @@
+         return;
+ #ifdef TSFP_OPENXR
+     if (V.xr_world_color == img) V.xr_world_color = NULL;
++    if (img->xr_right_frame) rhi_view_destroy(img->xr_right_frame);
+ #endif
+     trash(T_IMAGE, (uint64_t)img->image, img->alloc);
+     free(img);
+@@ -4177,6 +4198,8 @@
+ {
+     if (!V.view_mask || !V.xr_world_active)
+         return V.xr_identity_constants;
++    if (xr_fullscreen_draw())
++        return V.xr_identity_constants;
+     const TsfpModelRole role = tsfp_stereo_model_role();
+     if (role == TSFP_MODEL_BODY) {
+         if (!V.xr_body_uploaded && V.xr_body_constants) {
+@@ -4298,15 +4321,12 @@
+                       (V.rt_depth && v->image == V.rt_depth->image)))
+                 v = NULL;
+ #ifdef TSFP_OPENXR
+-            /* The Xbox full-frame effect samples one eye and blends that
+-             * image back over both eyes. Leave the stereo scene in place. */
++            /* Reuse the guest's 2D shader, with an eye-specific snapshot. */
+             if (V.view_mask && v && v->image->xr_frame_copy) {
+-                static int logged_frame_copy;
+-                if (!logged_frame_copy) {
+-                    logged_frame_copy = 1;
+-                    fprintf(stderr, "[M4] Skipped a mono frame-copy draw in the stereo scene\n");
+-                }
+-                return 0;
++                if (!v->image->xr_frame_paired)
++                    return 0;
++                if (V.xr_effect_view_mask == 2)
++                    v = v->image->xr_right_frame;
+             }
+ #endif
+             if (trace_on())
+@@ -4371,10 +4391,21 @@
+ 
+     /* Section 4.4: a negative height turns Vulkan's downward Y into D3D's.
+      * Depth needs nothing: both use [0, 1]. */
+-    v.x = vp->x;
+-    v.y = vp->y + vp->height;
+-    v.width = vp->width;
+-    v.height = -vp->height;
++#ifdef TSFP_OPENXR
++    const int fullscreen = xr_fullscreen_draw();
++    if (fullscreen) {
++        v.x = 0;
++        v.y = (float)V.area.height;
++        v.width = (float)V.area.width;
++        v.height = -(float)V.area.height;
++    } else
++#endif
++    {
++        v.x = vp->x;
++        v.y = vp->y + vp->height;
++        v.width = vp->width;
++        v.height = -vp->height;
++    }
+     v.minDepth = vp->min_depth;
+     v.maxDepth = vp->max_depth;
+ 
+@@ -4383,6 +4414,8 @@
+     /* The title's scissor is in its single camera's pixels. Applying it
+      * after the eye transform can cut a portal in one eye only. */
+     const TsfpModelRole role = tsfp_stereo_model_role();
++    if (use_scissor && fullscreen)
++        use_scissor = 0;
+     if (use_scissor && V.view_mask && (V.xr_draw_world || role != TSFP_MODEL_DEFAULT || xr_hud_draw())) {
+         static int logged_scissor;
+         if (!logged_scissor && (V.scissor.left > 0 || V.scissor.top > 0 ||
+@@ -4505,14 +4538,6 @@
+         }
+         return 0;
+     }
+-    if (V.view_mask && V.xr_world_active && tsfp_stereo_screen_effect_draw()) {
+-        static int reported;
+-        if (!reported) {
+-            reported = 1;
+-            fprintf(stderr, "[6DoF] Suppressed the Xbox screen effects pass in stereo\n");
+-        }
+-        return 0;
+-    }
+     if (V.view_mask && V.xr_world_active && tsfp_stereo_legacy_weapon_draw()) {
+         static int reported;
+         if (!reported) {
+@@ -4576,28 +4601,125 @@
+     return 1;
+ }
+ 
+-static void v_draw(uint32_t n, uint32_t first)
+-{
+-    if (n && prepare_draw())
++#ifdef TSFP_OPENXR
++static int xr_uses_frame_copy(void)
++{
++    if (!V.xr_world_active || !xr_world_target() || !V.ps)
++        return 0;
++    for (uint32_t i = 0; i < V.ps->nb; ++i) {
++        const Refl *binding = &V.ps->b[i];
++        const uint32_t slot = binding->binding - RHI_VK_TEXTURE_BASE;
++        if (binding->kind == 2 && slot < MAX_TEX && V.tex[slot] &&
++            V.tex[slot]->image->xr_frame_copy)
++            return 1;
++    }
++    return 0;
++}
++#endif
++
++static void draw_geometry(uint32_t n, uint32_t first, int32_t base, int indexed)
++{
++    if (!prepare_draw())
++        return;
++    if (!indexed) {
+         vkCmdDraw(cmd(), n, 1, first, 0);
+-}
+-
+-static void v_draw_indexed(uint32_t n, uint32_t first, int32_t base)
+-{
+-    BufVer *v;
+-    if (!n || !V.ib || !V.ib->nver || !prepare_draw())
+         return;
+-    v = &V.ib->ver[V.ib->cur];
++    }
++    BufVer *v = &V.ib->ver[V.ib->cur];
+     v->used = V.submitted + 1;
+     vkCmdBindIndexBuffer(cmd(), v->b, V.ib_offset,
+                          V.ib_bits == 32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+     vkCmdDrawIndexed(cmd(), n, 1, first, base, 0);
+ }
+ 
+-#ifdef TSFP_OPENXR
++static void draw_guest(uint32_t n, uint32_t first, int32_t base, int indexed)
++{
++    if (!n || (indexed && (!V.ib || !V.ib->nver)))
++        return;
++#ifdef TSFP_OPENXR
++    if (xr_uses_frame_copy()) {
++        end_rendering();
++        for (uint32_t eye = 1; eye <= 2; eye <<= 1) {
++            V.xr_effect_view_mask = eye;
++            draw_geometry(n, first, base, indexed);
++            end_rendering();
++        }
++        V.xr_effect_view_mask = 0;
++        return;
++    }
++#endif
++    draw_geometry(n, first, base, indexed);
++}
++
++static void v_draw(uint32_t n, uint32_t first)
++{
++    draw_guest(n, first, 0, 0);
++}
++
++static void v_draw_indexed(uint32_t n, uint32_t first, int32_t base)
++{
++    draw_guest(n, first, base, 1);
++}
++
++#ifdef TSFP_OPENXR
++int tsfp_vk_stereo_snapshot(RhiImage *destination)
++{
++    RhiImage *source = V.xr_world_color;
++    if (!V.xr_world_active || !source || !source->xr_layers || destination == source ||
++        destination->desc.samples != 1 || destination->desc.type != RHI_IMAGE_2D ||
++        destination->desc.depth != 1 || !(destination->desc.bind & RHI_BIND_SAMPLED))
++        return 0;
++
++    if (!destination->xr_right_frame) {
++        VkFormatProperties src, dst;
++        vkGetPhysicalDeviceFormatProperties(V.pd, source->format, &src);
++        vkGetPhysicalDeviceFormatProperties(V.pd, destination->format, &dst);
++        if (!(src.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
++            !(dst.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT))
++            return 0;
++        RhiImageDesc desc = destination->desc;
++        desc.bind = RHI_BIND_SAMPLED;
++        desc.mip_levels = 1;
++        RhiImage *right = v_image_create(&desc, NULL);
++        if (!right)
++            return 0;
++        destination->xr_right_frame = v_view_create(right, RHI_VIEW_SAMPLED, NULL);
++        v_image_destroy(right);
++        if (!destination->xr_right_frame)
++            return 0;
++    }
++
++    end_rendering();
++    const VkImageLayout restore = source->layout;
++    to_layout(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++    RhiImage *frames[] = {destination, destination->xr_right_frame->image};
++    for (uint32_t eye = 0; eye < 2; ++eye) {
++        RhiImage *frame = frames[eye];
++        const VkImageBlit blit = {
++            .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, eye, 1},
++            .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++            .srcOffsets = {{0, 0, 0}, {(int32_t)source->desc.width, (int32_t)source->desc.height, 1}},
++            .dstOffsets = {{0, 0, 0}, {(int32_t)frame->desc.width, (int32_t)frame->desc.height, 1}},
++        };
++        to_layout(frame, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++        vkCmdBlitImage(cmd(), source->image, source->layout, frame->image, frame->layout,
++                       1, &blit, VK_FILTER_NEAREST);
++        to_layout(frame, frame->steady);
++    }
++    to_layout(source, restore);
++    destination->xr_frame_copy = destination->xr_frame_paired = 1;
++    static int reported;
++    if (!reported) {
++        reported = 1;
++        fprintf(stderr, "[XR] Captured separate %ux%u screen effects snapshots for both eyes\n",
++                destination->desc.width, destination->desc.height);
++    }
++    return 1;
++}
++
+ RhiImage *tsfp_vk_uplink_source(void)
+ {
+-    return tsfp_vk_uplink_world_bound() ? V.xr_world_color : NULL;
++    return V.xr_world_active && xr_world_target() ? V.xr_world_color : NULL;
+ }
+ 
+ int tsfp_vk_uplink_copy(RhiImage *destination, const RhiBox boxes[2])

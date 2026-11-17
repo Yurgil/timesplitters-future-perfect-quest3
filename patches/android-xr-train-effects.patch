@@ -1,0 +1,91 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -1134,9 +1134,14 @@
+ 
+ static int xr_fullscreen_draw(void)
+ {
+-    return V.view_mask && (V.xr_effect_view_mask || V.xr_uplink_eye_mask ||
+-                           tsfp_stereo_screen_effect_draw());
++    return (V.xr_effect_view_mask && V.xr_world_active && xr_world_target()) ||
++           (V.view_mask && (V.xr_uplink_eye_mask || tsfp_stereo_screen_effect_draw()));
+ }
++
++static int xr_late_screen_effect(void)
++{
++    return tsfp_stereo_screen_effect_draw() == 0x000FED20;
++}
+ #endif
+ 
+ static int begin_rendering(void)
+@@ -1186,7 +1191,16 @@
+         }
+         if (!c->xr_array || (d && !d->xr_array))
+             V.xr_world_active = 0;
+-        if (V.xr_world_active) {
++        if (V.xr_world_active && V.xr_effect_view_mask && xr_late_screen_effect() &&
++            c->xr_right && (!d || d->xr_right)) {
++            /* The shatter compositor preserves the resolved color/depth of
++             * one eye per pass. Bind that layer directly without MSAA. */
++            if (V.xr_effect_view_mask == 2) {
++                cv = c->xr_right;
++                if (d)
++                    dv = d->xr_right;
++            }
++        } else if (V.xr_world_active) {
+             cv = c->xr_array;
+             if (d)
+                 dv = d->xr_array;
+@@ -4655,8 +4669,9 @@
+     if (!routine || !V.rt_color)
+         return;
+     static struct { int routine; unsigned paths; } seen[4];
++    const int scene = V.rt_color->image == V.xr_world_color;
+     const unsigned path = V.view_mask ? V.view_mask :
+-                          V.xr_effect_view_mask ? 4 + V.xr_effect_view_mask : 0;
++                          V.xr_effect_view_mask ? (scene ? 8 : 4) + V.xr_effect_view_mask : 0;
+     const unsigned bit = 1u << path;
+     for (unsigned i = 0; i < sizeof seen / sizeof seen[0]; ++i) {
+         if (!seen[i].routine)
+@@ -4666,7 +4681,7 @@
+         if (!(seen[i].paths & bit)) {
+             seen[i].paths |= bit;
+             fprintf(stderr, "[XR-FX] guest=%08x %s=%ux%u eyes=%u pass=%u fullscreen=%d\n",
+-                    routine, V.rt_color->image == V.xr_world_color ? "scene" : "target",
++                    routine, scene ? "scene" : "target",
+                     V.area.width, V.area.height, V.view_mask, V.xr_effect_view_mask,
+                     xr_fullscreen_draw());
+         }
+@@ -4674,6 +4689,22 @@
+     }
+ }
+ 
++static void xr_seed_right_scratch(RhiImage *left)
++{
++    RhiImage *right = left->xr_right_frame->image;
++    const VkImageLayout left_layout = left->layout, right_layout = right->layout;
++    const VkImageCopy region = {
++        .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++        .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++        .extent = {left->desc.width, left->desc.height, 1},
++    };
++    to_layout(left, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++    to_layout(right, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++    vkCmdCopyImage(cmd(), left->image, left->layout, right->image, right->layout, 1, &region);
++    to_layout(left, left_layout);
++    to_layout(right, right_layout);
++}
++
+ static int xr_effect_needs_eye_draws(void)
+ {
+     if (V.xr_uplink_eye_mask || !V.xr_world_active || !V.ps || !V.rt_color)
+@@ -4728,6 +4759,10 @@
+         if (world || (V.rt_color->base_mip == 0 && xr_prepare_right_frame(scratch) &&
+                       scratch->xr_right_target)) {
+             end_rendering();
++            /* A mono clear or write invalidates the eye pair. Seed the
++             * other attachment before draws that blend or mask channels. */
++            if (scratch && !scratch->xr_frame_paired && xr_late_screen_effect())
++                xr_seed_right_scratch(scratch);
+             int drawn = 1;
+             for (uint32_t eye = 1; eye <= 2; eye <<= 1) {
+                 V.xr_effect_view_mask = eye;

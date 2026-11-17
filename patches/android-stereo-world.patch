@@ -1,0 +1,137 @@
+--- a/src/d3d/d3d8_device.c
++++ b/src/d3d/d3d8_device.c
+@@ -16,6 +16,9 @@
+  */
+ 
+ #include "d3d8_internal.h"
++#ifdef TSFP_OPENXR
++#include "stereo_backend.h"
++#endif
+ #ifdef TSFP_TEXTURE_PACK
+ #include "texture_pack.h"
+ #include "texture_mode.h"
+@@ -592,6 +595,9 @@
+     state->swap_height = dd.height;
+     d3d8_display_scene_size(state->present_width, state->present_height,
+                             &state->width, &state->height);
++#ifdef TSFP_OPENXR
++    tsfp_vk_stereo_size(&state->width, &state->height);
++#endif
+ 
+     return S_OK;
+ }
+@@ -607,8 +613,17 @@
+         while(requested>1&&!rhi_sample_count_supported(formats[i],requested))requested/=2;
+     for(;;){
+         TsfpMsaaTargets t={0};
+-        if(!tsfp_msaa_targets_create(&t,state->width,state->height,
+-            RHI_FORMAT_R8G8B8A8_UNORM,RHI_FORMAT_D24_UNORM_S8_UINT,requested))return E_FAIL;
++        unsigned target_samples = requested;
++#ifdef TSFP_OPENXR
++        if (tsfp_vk_stereo_allocating(1))
++            target_samples = 1;
++#endif
++        const int allocated = tsfp_msaa_targets_create(&t,state->width,state->height,
++            RHI_FORMAT_R8G8B8A8_UNORM,RHI_FORMAT_D24_UNORM_S8_UINT,target_samples);
++#ifdef TSFP_OPENXR
++        tsfp_vk_stereo_allocating(0);
++#endif
++        if (!allocated) return E_FAIL;
+         unsigned samples=t.samples;
+         RhiImage *color=rhi_image_retain(t.resolved?t.resolved:t.color);
+         RhiView *single_rtv=rhi_view_create(color,RHI_VIEW_RENDER_TARGET,NULL);
+@@ -623,6 +638,9 @@
+             state->scene_surface=surface;state->rhi_scene_image=color;
+             state->rhi_scene_resolved=NULL;state->rhi_default_rtv=single_rtv;
+             state->rhi_scene_srv=t.srv;state->depth_image=t.depth;state->depth_view=t.dsv;
++#ifdef TSFP_OPENXR
++            tsfp_vk_stereo_world(color);
++#endif
+             rhi_set_render_target(draw,t.dsv);
+             fprintf(stderr,"[GRAPHICS] Scene %ux%u, MSAA %u requested / %u active\n",
+                 state->width,state->height,pc_graphics_get().msaa,samples);
+@@ -1590,6 +1608,11 @@
+     td.type = RHI_IMAGE_2D;
+     td.width = Width;
+     td.height = Height;
++#ifdef TSFP_OPENXR
++    if (tsfp_vk_stereo_geometry() && Width == g_device_state.present_width &&
++        Height == g_device_state.present_height)
++        tsfp_vk_stereo_size(&td.width, &td.height);
++#endif
+     td.depth = 1;
+     td.mip_levels = 1;
+     td.format = host;
+@@ -1604,7 +1627,7 @@
+         return E_FAIL;
+     }
+ 
+-    *ppSurface = d3d8_surface_create(img, 0, 0, Width, Height, surface_format,
++    *ppSurface = d3d8_surface_create(img, 0, 0, td.width, td.height, surface_format,
+                                      D3DPOOL_DEFAULT, D3DUSAGE_DEPTHSTENCIL,
+                                      MultiSample, NULL, 0);
+     rhi_image_destroy(img);
+--- a/src/hle/hle_d3d8_record.c
++++ b/src/hle/hle_d3d8_record.c
+@@ -43,6 +43,9 @@
+ 
+ #include "d3d8_xbox.h"
+ #include "d3d8_internal.h"
++#ifdef __ANDROID__
++#include "stereo_backend.h"
++#endif
+ #include "d3d8_vsh.h"
+ #include "d3d8_combiners.h"
+ #include "d3d8_capture.h"
+@@ -1676,6 +1679,17 @@
+ 
+ #ifdef _WIN32
+         if (depth && depth == g_device_depth && level == 0) {
++            hr = xbox_D3D8PrepareSharedDepthTarget(t, depth);
++            if (FAILED(hr)) return hr;
++        }
++#elif defined(__ANDROID__)
++        UINT width, height;
++        D3DSURFACE_DESC depth_desc;
++        if (depth && level == 0 && tsfp_vk_stereo_geometry() &&
++            d3d8_base_size(texture, &width, &height) &&
++            width == d3d8_GetGuestWidth() && height == d3d8_GetGuestHeight() &&
++            SUCCEEDED(depth->lpVtbl->GetDesc(depth, &depth_desc)) &&
++            (depth_desc.Width != width || depth_desc.Height != height)) {
+             hr = xbox_D3D8PrepareSharedDepthTarget(t, depth);
+             if (FAILED(hr)) return hr;
+         }
+--- a/src/d3d/d3d8_xbox.h
++++ b/src/d3d/d3d8_xbox.h
+@@ -1262,7 +1262,7 @@
+    The host's own back buffer is the source, because the guest's is empty --
+    nothing renders on that side. Scales if the texture is not screen-sized.
+    The destination must be a render-target texture. */
+-#ifdef _WIN32
++#if defined(_WIN32) || defined(__ANDROID__)
+ HRESULT xbox_D3D8PrepareSharedDepthTarget(IDirect3DTexture8 *texture,
+                                          IDirect3DSurface8 *depth);
+ #endif
+--- a/src/d3d/d3d8_screencopy.c
++++ b/src/d3d/d3d8_screencopy.c
+@@ -22,6 +22,9 @@
+  */
+ #include "d3d8_internal.h"
+ #include "d3d8_xbox.h"
++#ifdef TSFP_OPENXR
++#include "stereo_backend.h"
++#endif
+ #include "graphics/screen_copy_rect.h"
+ 
+ #include <stdio.h>
+@@ -355,6 +358,10 @@
+     /* A draw sampling this is re-presenting the frame, and has to cover
+      * the whole of it; see d3d8_draw_escapes_squeeze. */
+     tex->screen_copy = source == NULL;
++#ifdef TSFP_OPENXR
++    tsfp_vk_stereo_frame_copy(dst_image, !source && !src &&
++        tex->width == d3d8_GetGuestWidth() && tex->height == d3d8_GetGuestHeight());
++#endif
+     return S_OK;
+ }
+ 

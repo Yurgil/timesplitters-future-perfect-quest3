@@ -1,236 +1,77 @@
-<p align="right">
-<a href="https://ko-fi.com/thedoffman"><img src="docs/assets/ko-fi.png" alt="Support the project on Ko-fi" title="Support us on Ko-fi" width="40" height="32"></a>
-<a href="https://discord.gg/hFkfcCUm56"><img src="docs/assets/discord-community.svg" alt="Join the TimeSplitters: Future Perfect Recomp Discord community" title="Join our Discord community" width="32" height="32"></a>
-</p>
+# TimeSplitters: Future Perfect for Meta Quest 3
 
-<div align="center">
+An experimental standalone VR port of the original US Xbox game. The game code is statically recompiled to ARM64 and runs directly on Quest 3 with Vulkan and OpenXR.
 
-<a name="timesplitters-future-perfect"></a>
+## What's playable
 
-# TimeSplitters: Future Perfect Recomp
+- Stereoscopic first-person gameplay with 6DoF head tracking. Menus and selected scenes appear on a virtual screen.
+- Touch Plus tracking for hands, first-person weapons and aiming, including supported dual-wield weapons. Movement follows your head direction, and turning can be smooth or stepped.
+- Wrist-mounted SmartLink with a map and the original beam effect rendered per eye. Selected story effects also render per eye.
+- The Story menu, profile creation and reload, the first mission and scenes in later missions have been exercised on Quest 3 in development builds.
 
-Keyboard & mouse · 4K & ultrawide · Custom controls · Online multiplayer
+XMV videos are skipped. Some effects and later missions still need checks on the headset. See the [test history and open issues](docs/port-status.md).
 
-<p>
-<a href="https://github.com/TheDoffman/timesplitters-future-perfect-pc/releases/latest/download/TimeSplitters-Launcher-windows-x64.zip"><img src="docs/assets/download-windows-launcher.svg" alt="Download the latest Windows launcher (x64)" width="280" height="52"></a>
-<a href="https://github.com/TheDoffman/timesplitters-future-perfect-pc/releases/latest/download/TimeSplitters-Launcher-macos-arm64.zip"><img src="docs/assets/download-mac-launcher.svg" alt="Download the latest Mac launcher (Apple Silicon)" width="280" height="52"></a>
-<a href="https://github.com/TheDoffman/timesplitters-future-perfect-pc/releases/latest/download/TimeSplitters-Launcher-linux-x64.zip"><img src="docs/assets/download-linux-launcher.svg" alt="Download the latest Linux launcher (x64)" width="280" height="52"></a>
-</p>
+## Install a release APK
 
-<sub>Direct ZIP downloads of the latest stable launcher &middot; <a href="https://github.com/TheDoffman/timesplitters-future-perfect-pc/releases/latest">Release notes &amp; checksums</a></sub>
+If a Quest APK is available under [GitHub Releases](https://github.com/Yurgil/timesplitters-future-perfect-quest3/releases), download `timesplitters-quest3-release.apk`. You can also [build the release profile locally](docs/build.md).
 
-**[Install & play](#start-playing)** · [Launcher guides](#guides--support) · [Multiplayer](docs/players/multiplayer.md) · [Build from source](docs/development/building.md)
+1. Enable Developer Mode on your Quest 3, connect it over USB and accept the USB debugging prompt. Install Android Platform Tools and run `adb devices` to check the connection. [Meta's sideloading guide](https://developers.meta.com/vr/essentials/quick-start/)
+2. Prepare your own extracted **US Xbox** copy, title ID `45410066`, with `default.xbe`, `pak/` and `xmv/` at the top level. If you have an ISO, see [disc import](docs/build.md#prepare-the-game-dump). Verify the dump, install the APK and launch **TimeSplitters Quest** once to initialize storage. Close the app before transferring the game.
 
-<sub>Windows 10/11 x64 · Native Apple Silicon Mac · Linux x64 · Experimental port · Supported US Xbox game required</sub>
+   ```sh
+   GAME_DIR="/path/to/extracted/game"
+   python3 tools/check_game_dump.py "$GAME_DIR"
+   adb install -r timesplitters-quest3-release.apk
+   ```
 
-</div>
+3. Copy the game files to the headset and open **TimeSplitters Quest** under **Unknown Sources**. For a first check, choose `Story → 2401 — Time to Split → Normal`.
 
-<table>
-  <tr>
-    <td width="50%"><a href="docs/assets/gameplay-story1.jpg"><img src="docs/assets/gameplay-story1.jpg" alt="Dual-wielding weapons on an orange battlefield beneath an exploding aircraft" width="100%"></a></td>
-    <td width="50%"><a href="docs/assets/gameplay-story2.jpg"><img src="docs/assets/gameplay-story2.jpg" alt="Fighting a burning helicopter from a moving train in story mode" width="100%"></a></td>
-  </tr>
-  <tr>
-    <td width="50%"><a href="docs/assets/gameplay-arcade2.jpg"><img src="docs/assets/gameplay-arcade2.jpg" alt="Defending a cyan-lit compound alongside robots in an Arcade match" width="100%"></a></td>
-    <td width="50%"><a href="docs/assets/gameplay-arcade1.jpg"><img src="docs/assets/gameplay-arcade1.jpg" alt="Exchanging laser fire across a neon nightclub in an Arcade match" width="100%"></a></td>
-  </tr>
-</table>
+   ```sh
+   QUEST_GAME=/sdcard/Android/data/org.tsfp.quest/files/game
+   adb shell mkdir -p "$QUEST_GAME"
+   adb push "$GAME_DIR/default.xbe" "$GAME_DIR/pak" "$GAME_DIR/xmv" "$QUEST_GAME/"
+   ```
 
-<p align="center"><sub>In-game screenshots as of v0.3.2</sub></p>
+Android accepts in-place updates signed by the same key. Back up your profile before switching to a build signed by a different key. Uninstalling removes the app's saves and app-specific game directory.
 
-> [!IMPORTANT]
-> You need your own supported **US Xbox ISO or extracted game data**. Import it through the launcher.
-> Original game files are not included. No platform version needs an emulator.
+## Touch Plus controls
 
-<a name="start-playing"></a>
-
-## <img src="docs/assets/icon-play.svg" alt="" width="24" height="24"> Start playing
-
-Windows, Mac and Linux use the same installation steps:
-
-| Step | Installation |
-| :---: | --- |
-| **01** | **Download the launcher:** [Windows x64](https://github.com/TheDoffman/timesplitters-future-perfect-pc/releases/latest/download/TimeSplitters-Launcher-windows-x64.zip), [Mac (Apple Silicon)](https://github.com/TheDoffman/timesplitters-future-perfect-pc/releases/latest/download/TimeSplitters-Launcher-macos-arm64.zip), or [Linux x64](https://github.com/TheDoffman/timesplitters-future-perfect-pc/releases/latest/download/TimeSplitters-Launcher-linux-x64.zip). The download starts directly; you can also use the buttons above. |
-| **02** | **Extract and open.** Extract the whole ZIP to a writable folder. On Windows, open **TimeSplitters Launcher.exe**, keeping `Bin` and `Support` with it. On Mac, open **TimeSplitters Launcher.app**, keeping its `Support` folder beside it. On Linux, preserve executable permissions and run **Launch.sh** or **TimeSplitters.Launcher**, keeping the full package together. |
-| **03** | **Install the game runtime.** Keep **Update channel → Stable**, then choose **Install release**. The launcher downloads and verifies the latest available game build for your platform. Choose a preview only when opting into testing. |
-| **04** | **Import your game once.** Choose **Locate ISO**, or **Use extracted files** for a folder containing `default.xbe`, `pak` and `xmv`. |
-| **05** | **Press Play Game.** The launcher minimizes while the game runs and returns when you finish. |
-
-**Next time:** open the launcher and choose **Play Game**. Installed play remains
-available offline. Use **Check updates → Update release** to install a newer game
-build when available. Launcher and game versions are separate.
-
-Source contributors: ordinary clones and builds do not require the Enhanced
-texture download. See [cloning without optional textures](CONTRIBUTING.md#clone-without-optional-textures).
-
-### Launcher preview
-
-**Weapon view:** In builds containing the Weapon FOV option, open **Settings →
-Video Options → View & HUD → Weapon FOV** from the main or pause menu. Choose
-80–150% and select **Apply**; no restart is needed. **Original** is 100%.
-Higher values show more of the weapon, independently of the world FOV slider.
-These percentages adjust the weapon's original lens, rather than degrees.
-
-![TimeSplitters launcher v1.4.0 with Stable selected, Play Game, updates and settings](docs/assets/launcher-preview.png)
-
-Launcher v1.4.0 interface preview with illustrative installation data.
-**Stable** is selected, matching the setup instructions above.
-
-<details>
-<summary><strong>System requirements, channels and keeping your saves</strong></summary>
-
-- **Windows:** Windows 10/11 x64 with .NET Framework 4.8.
-- **Linux:** x64, Ubuntu 24.04 / glibc 2.39 or newer, a desktop display and a working system Vulkan driver. Wayland needs XWayland. See the [Linux launcher guide](docs/players/linux-launcher.md).
-- **Mac:** Apple Silicon (M1 or newer). The launcher targets macOS 12+; the
-  current shared Vulkan game renderer requires macOS 26+. See the
-  [Mac guide](docs/players/macos.md) for the legacy OpenGL fallback on older systems.
-- Your supported **US Xbox game**, title ID `45410066`; [exact executable hash](docs/development/building.md#inputs-and-generated-files).
-- Internet access for the initial runtime download; about **5 GB** for the game,
-  plus space for update staging, rollback and any optional textures.
-- **Stable** is the default game channel. Choose **Preview**, then **Beta** or a named feature under **Testing track** for opt-in testing. Each track follows its own updates in launcher 1.3.0+. See [release channels](docs/release/releasing.md).
-- Keep the whole installation together, especially `Data`, `Settings`, `Saves`
-  and the launcher's recovery files. Normal updates preserve existing data,
-  settings and saves.
-- **Mac launcher storage:** defaults to `~/Library/Application Support/TimeSplitters`,
-  independently of the `.app` location. Existing installations beside the app
-  migrate automatically, retaining the original as a backup. Portable mode remains
-  available. See [storage and migration](docs/players/macos.md#launcher-storage).
-
-Published builds do not require Python, Git or developer tools. The Mac launcher
-includes .NET and does not need CrossOver or the .NET SDK.
-
-</details>
-
-### Platform status
-
-This is an experimental port. Full campaign completion and complete rendering
-and audio fidelity remain unverified. See [measured progress](docs/project/STATUS.md).
-
-| Platform | Support and known limits |
+| Input | In immersive gameplay |
 | --- | --- |
-| **Windows 10/11 x64** | Keyboard and mouse, graphics settings and experimental Online/LAN multiplayer. See the [Windows launcher guide](docs/players/launcher.md), including [startup security prompts](docs/players/launcher.md#windows-security-prompts-at-startup). |
-| **Mac (Apple Silicon)** | Native launcher and game; Intel Macs are unsupported. The app is not notarized, so startup may require the [Mac installation and recovery guidance](docs/players/mac-launcher.md#shared-behavior-and-distribution). See [Mac controls and source builds](docs/players/macos.md) and [remaining Mac work](docs/project/MAC_PORT_BACKLOG.md). |
-| **Linux x64 (experimental)** | Native launcher and portable SDL/Vulkan game package, validated on Ubuntu/WSL. Native desktop GPU, Wayland, controller and Steam Deck acceptance remain pending. See the [Linux launcher guide](docs/players/linux-launcher.md) and [acceptance limits](docs/development/linux-acceptance.md). |
+| Head movement | Look and lean |
+| Left stick | Move relative to where you are looking |
+| Right stick left/right | Turn smoothly or snap by 30°, 45°, or 60° |
+| Tracked controllers | Aim held weapons |
+| Right / left trigger | Xbox RT / LT, including the game's firing actions |
+| Right **B** | Xbox **X** (reload / action) |
+| Left **X** | Change the current weapon's function |
+| Left **Y** | Cycle to the next weapon |
+| Right **A** | Xbox **A** |
+| Left / right Grip | Xbox left / right shoulder inputs |
+| Left **Menu** (☰) | Pause / Xbox Start |
+| Hold both stick clicks for two seconds | Calibrate the tracked hands |
 
-<a name="pc-features"></a>
+The right stick aims mounted guns. While mounted, left **X** and **Y** send Xbox **B** and **Y**. In menus and on the virtual screen, the face buttons and sticks keep their original Xbox mappings. Hold both Grips and move the left stick to use the D-pad there.
 
-## <img src="docs/assets/icon-settings.svg" alt="" width="24" height="24"> PC features
+Open **VR Options** from Settings or the pause menu. **Turn Type** defaults to **Smooth**. Select **Snap** to show **Snap Angle**. Settings are saved for the next launch.
 
-| Feature | Details |
-| --- | --- |
-| **Keyboard and mouse** | Direct aiming, customizable bindings, mouse-driven menus and input prompts that follow your controls. |
-| **Widescreen** | 1080p, 1440p, 4K and ultrawide support, with adjustable field of view. |
-| **Anti-aliasing** | Optional [SMAA 1x High](docs/players/smaa.md) smooths jagged edges on compatible Direct3D 11/Vulkan builds. |
-| **High frame rate** | Original 60 FPS by default; compatible game builds offer opt-in [120/180/240 FPS beta settings](docs/analysis/native-high-refresh.md). |
-| **Launcher** | Game installation, updates, repair, rollback and settings. |
-| **Local split-screen** | Play with multiple players on the same screen using controllers. |
-| **Online multiplayer** | Player-hosted Online and LAN matches with bot support. Windows only. |
-| **Extras** | Optional [Discord Rich Presence](docs/players/discord-presence.md), FPS overlays and local crash diagnostics. |
+For a one-launch snap-turn override, stop the app and restart it with ADB.
 
-Availability depends on your platform and installed game version. Check the
-launcher's **Release notes**, [platform status](#platform-status) and
-[measured progress](docs/project/STATUS.md) for support and known limits.
+```sh
+adb shell am force-stop org.tsfp.quest
+adb shell am start -n org.tsfp.quest/.XrActivity --ez snap_turn true
+```
 
-## Multiplayer
+You can also pass `--ei xr_msaa 1` or `--ei xr_anisotropy 1` at startup. The defaults are 2× MSAA and 4× anisotropic filtering.
 
-### Local split-screen
+## Build from source
 
-1. Connect your controllers and choose the number
-   of players.
-2. Press **Start** on your controllers in the order you want to join.
-3. Select or create a profile, then continue.
+The [build guide](docs/build.md) covers the pinned Apple Silicon toolchain, game-code generation, release signing and APK validation. The release profile optimizes the generated game code, strips native debug information and disables the port's capture, profiling and file logging.
 
-Join assignments last for the session. To configure the devices manually, use the launcher
-or the in-game **Controls > General > Local multiplayer**.
+## License and credits
 
-**Automatic**
-lets the game use a connected controller without a fixed assignment. To change the player count, return to the main menu;
-joining during an active match is not supported. Only one keyboard/mouse player
-is supported; additional players need controllers.
+The original Quest port code and documentation are available under [GPL-3.0-only](LICENSE), subject to notices in individual files. The upstream [NOTICE](NOTICE) and [component licenses](LICENSES/README.md) cover separately licensed work.
 
-### Controller stick response
+**Special thanks to TheDoffman** and the [TimeSplitters: Future Perfect Recomp contributors](https://github.com/TheDoffman/timesplitters-future-perfect-pc). Their PC recompilation and shared runtime made this Quest fork possible. Thanks also to [nemonicicon and the ts3FPrecomp contributors](https://github.com/nemonicicon/ts3FPrecomp) and the [xboxrecomp contributors](https://github.com/sp00nz/xboxrecomp).
 
-In **Settings → Controls → Controller** (also available while paused), adjust
-**Movement deadzone** and **Aim deadzone** for the selected player. Changes save
-and apply immediately. Lower values respond sooner; raise them if a stick drifts.
-Existing settings stay unchanged until edited. The original aiming curve remains.
-The launcher offers the same per-player controls under **Game settings → Keyboard
-& mouse → Controller deadzones**; select **Save settings** before launching.
-
-### Online / LAN
-
-Choose **Online / System Link → Online** to host or join a match,
-or **System Link** for LAN play. Everyone needs matching game builds and data.
-Online hosts need port forwarding; guests join using the host's invitation.
-Follow the [multiplayer guide](docs/players/multiplayer.md) for setup, ports and bots.
-
-Online is experimental;
-Story co-op is not supported yet.
-
-## Enhanced textures
-
-The partial texture overhaul is an optional launcher download for Windows, Mac
-and Linux.
-**Classic** textures remain the default.
-
-When the optional pack is available, use **Game settings → Graphics & resolution
-→ Check texture downloads**, then **Download / update textures**. Enable and save
-**Use enhanced textures (Beta)** to use it on future launches. See the
-[texture guide](docs/textures/textures.md) for availability, coverage and known issues.
-
-## Developer Tools
-
-Enable **Developer Tools** in **Extras > Developer Tools** or the launcher, then
-press **F1** to open the sidebar. It includes free camera, no-clip, game speed,
-input/video settings, and diagnostics. Change its shortcut in **Key bindings**.
-
-In multiplayer, the host controls the **Tools** tab through **Options > Developer
-Tools** (default **Off**). **Settings** and **Diagnostics** remain accessible;
-**Time & audio** and **Player & progression** are unavailable online.
-
-Native Mac/Linux validation is pending; see [validation](docs/project/STATUS.md).
-
-<a name="guides--support"></a>
-
-## <img src="docs/assets/icon-support.svg" alt="" width="24" height="24"> Guides & support
-
-[All documentation](docs/README.md) · [Repository layout and naming](docs/development/repository-layout.md)
-
-| Playing | Development |
-| --- | --- |
-| [Windows launcher](docs/players/launcher.md) | [Build from source](docs/development/building.md) |
-| [Mac launcher](docs/players/mac-launcher.md) | [Native Mac build](docs/players/macos.md) |
-| [Controls & display](docs/players/windows-settings.md) | [Shared Windows/Mac architecture](docs/development/shared-platform.md) |
-| [Multiplayer](docs/players/multiplayer.md) | [Release publishing](docs/release/releasing.md) |
-| [Textures](docs/textures/textures.md) | [Isolated gameplay testing](docs/development/testing-profile.md) |
-| [Crash reports](docs/players/windows-crash-logger.md) | [Repository map for agents](docs/agent-context/README.md) |
-
-**[Report a bug](https://github.com/TheDoffman/timesplitters-future-perfect-pc/issues/new?template=01-bug-report.yml)**
-with your installed versions, platform and steps to reproduce. The launcher's
-**Diagnostics** page provides local reports and logs; nothing uploads automatically.
-Keep personal saves and game data private.
-
-Suggest improvements in **[Ideas](https://github.com/TheDoffman/timesplitters-future-perfect-pc/discussions/categories/ideas)**.
-To contribute, run the [local CI preflight](docs/development/ci.md#run-runtime-checks-before-pushing)
-for runtime changes and read the [contributing guide](CONTRIBUTING.md),
-[project rules](AGENTS.md) and [code of conduct](CODE_OF_CONDUCT.md).
-Report security vulnerabilities privately using the [security policy](SECURITY.md).
-
-## Credits & license
-
-The project statically recompiles the Xbox executable into native code; it does
-not recover the original C/C++ source. The pinned runtime source is bundled with its credits and licenses, and the [independent tooling replacement](docs/development/independent-runtime.md) is in progress. See [bundled runtime source](docs/development/building.md#bundled-runtime-source) for setup verification and remaining dependencies.
-
-Original project code and documentation are licensed under **GPL-3.0-only**,
-except where stated otherwise. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
-When distributing GPL-covered binaries, provide corresponding source and build
-instructions and preserve the required notices. Upstream and third-party
-components retain their own [licenses and credits](LICENSES/README.md).
-
-**This license does not cover the original TimeSplitters game or its assets.**
-You must supply your own supported game files. Original game data, generated
-game code, personal settings and saves are not included in this repository.
-
-The [Linux x64 launcher](docs/players/linux-launcher.md) uses the shared desktop
-interface and installs the matching Linux game package. See the Linux guide for
-desktop prerequisites and the experimental port's remaining validation limits.
+TimeSplitters: Future Perfect was developed by Free Radical Design and published by Electronic Arts. Rights in the original executable, translated game logic and assets remain with their respective rights holders. Generate the translated game code locally from your own supported dump.

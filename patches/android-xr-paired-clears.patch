@@ -1,0 +1,69 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -1142,6 +1142,12 @@
+ {
+     return tsfp_stereo_screen_effect_draw() == 0x000FED20;
+ }
++
++static void xr_invalidate_frame_copy(RhiImage *image)
++{
++    if (image != V.xr_world_color)
++        image->xr_frame_copy = image->xr_frame_paired = 0;
++}
+ #endif
+ 
+ static int begin_rendering(void)
+@@ -1214,12 +1220,8 @@
+     }
+ #endif
+ #ifdef TSFP_OPENXR
+-    if (c && c->image != V.xr_world_color) {
+-        if (!V.xr_effect_view_mask)
+-            c->image->xr_frame_copy = c->image->xr_frame_paired = 0;
+-        else if (V.xr_effect_view_mask == 2)
+-            cv = c->image->xr_right_target->view;
+-    }
++    if (c && c->image != V.xr_world_color && V.xr_effect_view_mask == 2)
++        cv = c->image->xr_right_target->view;
+ #endif
+     if (c) {
+         w = c->width;
+@@ -3015,13 +3017,24 @@
+ {
+     if (!v || v->kind != RHI_VIEW_RENDER_TARGET)
+         return;
++#ifdef TSFP_OPENXR
++    RhiImage *image = v->image;
++    const int paired_clear = xr_late_screen_effect() && image->xr_frame_paired &&
++                             image->xr_right_frame && v->base_mip == 0;
++    if (!paired_clear)
++        xr_invalidate_frame_copy(image);
++#endif
+     if (trace_on())
+         fprintf(stderr, "[VKTRACE] clear color %p (%s) %.3f %.3f %.3f %.3f\n", (void *)v,
+                 V.rt_color == v ? "bound" : "not bound", rgba[0], rgba[1], rgba[2], rgba[3]);
+-    if (clear_in_scope(v, VK_IMAGE_ASPECT_COLOR_BIT, rgba, 0.0f, 0))
+-        return;
+-    clear_image(v->image, v->base_mip, 1, clear_view_base_layer(v), clear_view_layers(v),
+-                VK_IMAGE_ASPECT_COLOR_BIT, rgba, 0.0f, 0);
++    if (!clear_in_scope(v, VK_IMAGE_ASPECT_COLOR_BIT, rgba, 0.0f, 0))
++        clear_image(v->image, v->base_mip, 1, clear_view_base_layer(v), clear_view_layers(v),
++                    VK_IMAGE_ASPECT_COLOR_BIT, rgba, 0.0f, 0);
++#ifdef TSFP_OPENXR
++    if (paired_clear)
++        clear_image(image->xr_right_frame->image, 0, 1, 0, 1,
++                    VK_IMAGE_ASPECT_COLOR_BIT, rgba, 0.0f, 0);
++#endif
+ }
+ 
+ static void v_clear_depth(RhiView *v, uint32_t flags, float z, uint8_t s)
+@@ -4735,6 +4748,9 @@
+         return 0;
+ #ifdef TSFP_OPENXR
+     xr_log_screen_effect();
++    // Opening a render scope or clearing depth does not write the color copy.
++    if (!V.xr_effect_view_mask && V.rt_color && blend_desc()->write_mask)
++        xr_invalidate_frame_copy(V.rt_color->image);
+ #endif
+     if (!indexed) {
+         vkCmdDraw(cmd(), n, 1, first, 0);

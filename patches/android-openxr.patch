@@ -1,0 +1,37 @@
+--- a/src/input/recomp_pad.c
++++ b/src/input/recomp_pad.c
+@@ -13,6 +13,10 @@
+  */
+ #include "recomp_pad.h"
+ 
++#ifdef TSFP_OPENXR
++int tsfp_xr_read_pad(int slot, RecompPadState *out);
++#endif
++
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -282,6 +286,10 @@
+         return xinput_read(slot, out);
+ #else
+     (void)recomp_pad_api();
++#endif
++#ifdef TSFP_OPENXR
++    if (tsfp_xr_read_pad(slot, out))
++        return 1;
+ #endif
+     return sdl_read(slot, out);
+ }
+@@ -304,6 +312,12 @@
+     {
+         RecompPadState st;
+         const char *name = NULL;
++#ifdef TSFP_OPENXR
++        if (tsfp_xr_read_pad(slot, &st)) {
++            snprintf(out, n, "Quest Touch");
++            return;
++        }
++#endif
+         if (!sdl_read(slot, &st))
+             return;
+         SDL_LockSpinlock(&g_lock);

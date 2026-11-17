@@ -1,0 +1,1218 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -59,16 +59,31 @@
+ #endif
+ 
+ #include "rhi_backend.h"
++#ifdef TSFP_QUEST_HITCH_TRACE
++#include "hitch_trace.h"
++#endif
+ #include "vulkan_interface.h"
+ #include "upload_copy.h"
+ #include "rhi_vulkan_bindings.h"
+ #include "rhi_shader_cache.h"
++#ifdef TSFP_OPENXR
++#include "xr.h"
++#include "stereo_backend.h"
++#include "stereo_probe.h"
++#include "stereo_shader.h"
++#endif
+ 
+ /* d3d8_compile.c: every backend shows each HLSL source to it first. */
+ void d3d8_hlsl_note(const char *src, size_t len, const char *name,
+                     const RhiMacro *macros, const char *entry, const char *target);
+-/* rhi_vulkan_dxc.cpp */
+-int rhi_vk_dxc_compile(uint32_t stage, const RhiShaderSource *src,
++#ifdef __ANDROID__
++#define RHI_VK_COMPILE rhi_vk_shaderc_compile
++#define VK_COMPILER_CACHE "vulkan-shaderc-1"
++#else
++#define RHI_VK_COMPILE rhi_vk_dxc_compile
++#define VK_COMPILER_CACHE "vulkan-dxc-2-hlsl2018"
++#endif
++int RHI_VK_COMPILE(uint32_t stage, const RhiShaderSource *src,
+                        uint32_t **spirv, size_t *spirv_bytes, char *err, size_t err_len);
+ 
+ #define FRAMES          2
+@@ -78,7 +93,10 @@
+ #define MAX_TEX         16
+ #define MAX_UBO         8
+ #define MAX_REFL        32
++#define PUSH_BINDINGS   (RHI_VK_SAMPLER_BASE + MAX_TEX)
+ 
++_Static_assert(PUSH_BINDINGS <= 64, "push binding mask");
++
+ /* ---- objects ------------------------------------------------------------------ */
+ 
+ typedef struct {
+@@ -86,8 +104,14 @@
+     VmaAllocation a;
+     uint8_t      *p;
+     uint64_t      used;             /* the submission that last read it */
++    int           needs_flush;
+ } BufVer;
+ 
++typedef union {
++    VkDescriptorBufferInfo buffer;
++    VkDescriptorImageInfo image;
++} PushBinding;
++
+ struct RhiBuffer {
+     RhiBufferDesc desc;
+     int           uniform;
+@@ -109,6 +133,10 @@
+     int                swapchain;   /* stands for the acquired swap chain image */
+     VkImage            image;
+     VmaAllocation      alloc;
++#ifdef TSFP_OPENXR
++    int                xr_layers;
++    int                xr_frame_copy;
++#endif
+     VkFormat           format;
+     VkImageAspectFlags aspect;
+     VkImageLayout      layout;      /* the whole image */
+@@ -120,6 +148,9 @@
+     RhiImage    *image;
+     int          swapchain;
+     VkImageView  view;
++#ifdef TSFP_OPENXR
++    VkImageView  xr_array;
++#endif
+     VkImageViewType type;
+     uint32_t     base_mip, base_layer, layers;
+     uint32_t     width, height;     /* of the viewed mip */
+@@ -205,7 +236,7 @@
+     uint32_t    fill, depth_clamp;
+     VkFormat    color, depth;
+     uint32_t    samples;
+-    uint32_t    topo_class;
++    uint32_t    topo_class, view_mask;
+     /* Only populated when extended dynamic state is unavailable. */
+     RhiDepthDesc fixed_depth;
+     RhiRasterDesc fixed_raster;
+@@ -234,7 +265,7 @@
+     VkFormat                 depth24;       /* D24S8, or D32S8 where there is none */
+     int feat_depth_clamp, feat_fill, feat_bias_clamp, feat_aniso, feat_border;
+     int                      validation;
+-    int compat12, feat_push;
++    int compat12, feat_push, feat_multiview;
+ 
+     VkDescriptorSetLayout    set_layout;
+     VkPipelineLayout         pipe_layout;
+@@ -247,6 +278,19 @@
+     uint64_t                 frame_no;
+     int                      recording, rendering;
+     VkExtent2D               area;
++    uint32_t                 view_mask;
++#ifdef TSFP_OPENXR
++    RhiImage                *xr_world_color;
++    RhiBuffer               *xr_eye_constants, *xr_identity_constants;
++    RhiBuffer               *xr_weapon_constants;
++    RhiBuffer               *xr_body_constants;
++    RhiBuffer               *xr_tracked_constants[TSFP_MODEL_TRACKED_COUNT];
++    int                      xr_world_tried, xr_world_active, xr_draw_world;
++    int                      xr_avatar_capture;
++    int                      xr_weapon_uploaded;
++    int                      xr_body_uploaded;
++    unsigned                 xr_tracked_uploaded;
++#endif
+ 
+     Trash                   *trash;
+     uint32_t                 ntrash, trash_cap;
+@@ -287,6 +331,8 @@
+     uint32_t         stencil_ref;
+     RhiRasterState  *raster;
+     VkPipeline       cur_pipe;
++    uint64_t         pushed_mask;
++    PushBinding      pushed[PUSH_BINDINGS];
+     /* The dynamic state the command buffer currently holds, so a draw sets
+      * only what changed. Dynamic state lives in the command buffer and
+      * persists across pipeline binds (every pipeline here declares the
+@@ -327,6 +373,10 @@
+     int              vrr;               /* rhi_swapchain_set_vrr */
+     RhiImage         proxy_image;
+     RhiView          proxy_view;
++#ifdef TSFP_OPENXR
++    RhiImage        *xr_image;
++    RhiView         *xr_view;
++#endif
+ } SC;
+ 
+ static void full_barrier(VkCommandBuffer cb);
+@@ -466,6 +516,7 @@
+ static struct {
+     uint64_t image_updates,image_bytes,copy_calls,uniform_updates,uniform_skips;
+     uint64_t ubo_uploads,ubo_bytes,wait_calls,wait_ns,pipeline_calls,ubo_checks,ubo_reuses;
++    uint64_t push_written, push_reused;
+ } upload_metrics;
+ static int upload_profile_enabled(void)
+ {
+@@ -492,6 +543,10 @@
+ }
+ static void upload_note_frame(void)
+ {
++    if (upload_profile_enabled() && V.feat_push && V.frame_no && !(V.frame_no % 300))
++        fprintf(stderr, "[VK-PUSH] frames=%llu written=%llu reused=%llu\n",
++                (unsigned long long)V.frame_no, (unsigned long long)upload_metrics.push_written,
++                (unsigned long long)upload_metrics.push_reused);
+     if(upload_profile_enabled() && V.frame_no && !(V.frame_no%300))
+         fprintf(stderr,"[VK-UPLOAD] frames=%llu optimized=%d images=%llu image_bytes=%llu copy_calls=%llu uniform_updates=%llu uniform_skips=%llu ubo_checks=%llu ubo_reuses=%llu ubo_uploads=%llu ubo_bytes=%llu wait_calls=%llu wait_us=%llu pipeline_calls=%llu\n",
+             (unsigned long long)V.frame_no,upload_batch_enabled(),
+@@ -606,6 +661,7 @@
+     V.recording = 1;
+     V.rendering = 0;
+     V.cur_pipe = VK_NULL_HANDLE;
++    V.pushed_mask = 0;
+     V.dyn.valid = 0;                    /* a new command buffer holds no dynamic state */
+ }
+ 
+@@ -778,7 +834,7 @@
+     if (on == SC.vrr)
+         return;
+     SC.vrr = on;
+-    if (!V.dev)
++    if (!V.dev || !V.surface)
+         return;
+     SC.mode = choose_mode(SC.interval);
+     SC.stale = 1;                       /* the next acquire recreates it */
+@@ -942,6 +998,87 @@
+     V.rendering = 0;
+ }
+ 
++#ifdef TSFP_OPENXR
++static RhiBuffer *v_buffer_create(const RhiBufferDesc *d, const void *initial);
++static void v_buffer_destroy(RhiBuffer *b);
++static void v_buffer_update(RhiBuffer *b, const void *data);
++
++static _Thread_local int xr_allocating;
++
++int tsfp_vk_stereo_geometry(void)
++{
++    return V.xr_eye_constants && V.xr_identity_constants;
++}
++
++void tsfp_vk_stereo_size(uint32_t *width, uint32_t *height)
++{
++    const VkExtent2D extent = tsfp_xr_geometry_extent();
++    if (V.feat_multiview && tsfp_xr_geometry_enabled() && extent.width && extent.height) {
++        *width = extent.width;
++        *height = extent.height;
++    }
++}
++
++int tsfp_vk_stereo_allocating(int active)
++{
++    if (active && V.feat_multiview && tsfp_xr_geometry_enabled() && !tsfp_vk_stereo_geometry()) {
++        const RhiBufferDesc desc = { .size = 32 * sizeof(float), .usage = RHI_USAGE_DYNAMIC, .bind = RHI_BIND_UNIFORM };
++        float identity[32] = {0};
++        for (unsigned i = 0; i < 4; ++i)
++            identity[i * 5] = identity[16 + i * 5] = 1.0f;
++        V.xr_eye_constants = v_buffer_create(&desc, identity);
++        V.xr_identity_constants = v_buffer_create(&desc, identity);
++        if (!tsfp_vk_stereo_geometry()) {
++            if (V.xr_eye_constants) v_buffer_destroy(V.xr_eye_constants);
++            if (V.xr_identity_constants) v_buffer_destroy(V.xr_identity_constants);
++            V.xr_eye_constants = V.xr_identity_constants = NULL;
++        } else {
++            V.xr_weapon_constants = v_buffer_create(&desc, identity);
++            V.xr_body_constants = v_buffer_create(&desc, identity);
++            for (unsigned role = TSFP_MODEL_LEFT_WEAPON; role < TSFP_MODEL_TRACKED_COUNT; ++role)
++                V.xr_tracked_constants[role] = v_buffer_create(&desc, identity);
++        }
++    }
++    xr_allocating = active && tsfp_vk_stereo_geometry();
++    return xr_allocating;
++}
++
++void tsfp_vk_stereo_world(RhiImage *color)
++{
++    V.xr_world_color = color;
++}
++
++void tsfp_vk_stereo_frame_copy(RhiImage *image, int full_frame)
++{
++    image->xr_frame_copy = full_frame;
++}
++
++void tsfp_vk_stereo_draw(int world)
++{
++    V.xr_draw_world = world;
++}
++
++void tsfp_vk_avatar_capture_begin(void)
++{
++    if (V.xr_world_active && V.xr_world_color && V.xr_world_color->xr_layers)
++        V.xr_avatar_capture = tsfp_xr_avatar_capture_begin(V.xr_world_color);
++}
++
++void tsfp_vk_avatar_capture_end(void)
++{
++    if (V.xr_avatar_capture) {
++        tsfp_xr_avatar_capture_end(V.xr_world_color, V.xr_avatar_capture);
++        V.xr_avatar_capture = 0;
++    }
++}
++
++const RhiMacro *tsfp_vk_stereo_macros(void)
++{
++    static const RhiMacro macros[] = { { "TSFP_STEREO_GEOMETRY", "1" }, { NULL, NULL } };
++    return tsfp_vk_stereo_geometry() ? macros : NULL;
++}
++#endif
++
+ static int begin_rendering(void)
+ {
+     VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+@@ -960,6 +1097,40 @@
+         return 0;
+     if (d)
+         dv = d->view;
++    uint32_t view_mask = 0;
++#ifdef TSFP_OPENXR
++    if (c && c->image == V.xr_world_color && tsfp_vk_stereo_geometry()) {
++        static int logged_color, logged_depth, logged_pass;
++        if (!c->xr_array && !logged_color) {
++            logged_color = 1;
++            fprintf(stderr, "[M4] Scene color has no two-layer attachment view\n");
++        }
++        if (d && !d->xr_array && !logged_depth) {
++            logged_depth = 1;
++            fprintf(stderr, "[M4] Scene depth has no two-layer attachment view (%ux%u, %u samples)\n",
++                    d->width, d->height, d->image->desc.samples);
++        }
++        if (!V.xr_world_tried) {
++            float rows[32];
++            V.xr_world_tried = 1;
++            V.xr_world_active = c->xr_array && (!d || d->xr_array) && tsfp_xr_world_matrices(rows);
++            if (V.xr_world_active)
++                v_buffer_update(V.xr_eye_constants, rows);
++        }
++        if (!c->xr_array || (d && !d->xr_array))
++            V.xr_world_active = 0;
++        if (V.xr_world_active) {
++            cv = c->xr_array;
++            if (d)
++                dv = d->xr_array;
++            view_mask = 3;
++            if (!logged_pass) {
++                logged_pass = 1;
++                fprintf(stderr, "[M4] Scene render pass using two color/depth layers\n");
++            }
++        }
++    }
++#endif
+     if (c) {
+         w = c->width;
+         h = c->height;
+@@ -973,6 +1144,7 @@
+     ri.renderArea.extent.width = w;
+     ri.renderArea.extent.height = h;
+     ri.layerCount = 1;
++    ri.viewMask = view_mask;
+     if (c) {
+         ca.imageView = cv;
+         ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+@@ -994,6 +1166,7 @@
+     V.rendering = 1;
+     V.area.width = w;
+     V.area.height = h;
++    V.view_mask = ri.viewMask;
+     return 1;
+ }
+ 
+@@ -1093,13 +1266,18 @@
+     if (want_validation && !V.validation)
+         fprintf(stderr, "[RHI] vulkan: validation asked for, but the layer is not installed\n");
+ #if defined(RHI_VULKAN_SDL)
+-    Uint32 count=0;
+-    const char *const *required=SDL_Vulkan_GetInstanceExtensions(&count);
+-    if(!required || count>12) {
+-        fprintf(stderr,"[RHI] vulkan: SDL surface extensions unavailable: %s\n",SDL_GetError());
+-        return -1;
++#ifdef TSFP_OPENXR
++    if (!tsfp_xr_enabled())
++#endif
++    {
++        Uint32 count=0;
++        const char *const *required=SDL_Vulkan_GetInstanceExtensions(&count);
++        if(!required || count>12) {
++            fprintf(stderr,"[RHI] vulkan: SDL surface extensions unavailable: %s\n",SDL_GetError());
++            return -1;
++        }
++        for(Uint32 i=0;i<count;i++)exts[next++]=required[i];
+     }
+-    for(Uint32 i=0;i<count;i++)exts[next++]=required[i];
+ #else
+     exts[next++] = VK_KHR_SURFACE_EXTENSION_NAME;
+ #if defined(_WIN32)
+@@ -1130,7 +1308,15 @@
+         dci.pfnUserCallback = on_debug;
+         ici.pNext = &dci;
+     }
+-    VKCHECK(vkCreateInstance(&ici, NULL, &V.instance), "vkCreateInstance");
++#ifdef TSFP_OPENXR
++    if (tsfp_xr_enabled()) {
++        if (!tsfp_xr_create_instance(vkGetInstanceProcAddr, &ici, &V.instance))
++            return -1;
++    } else
++#endif
++    {
++        VKCHECK(vkCreateInstance(&ici, NULL, &V.instance), "vkCreateInstance");
++    }
+     volkLoadInstance(V.instance);
+     if (V.validation)
+         vkCreateDebugUtilsMessengerEXT(V.instance, &dci, NULL, &V.messenger);
+@@ -1139,28 +1325,36 @@
+ 
+ static int pick_physical_device(void)
+ {
+-    VkPhysicalDevice pds[8];
+-    uint32_t n = 8, i, pick = 0;
+-    const char *want = getenv("RECOMP_VK_DEVICE");
++#ifdef TSFP_OPENXR
++    if (tsfp_xr_enabled()) {
++        if (!tsfp_xr_physical_device(V.instance, &V.pd))
++            return -1;
++    } else
++#endif
++    {
++        VkPhysicalDevice pds[8];
++        uint32_t n = 8, i, pick = 0;
++        const char *want = getenv("RECOMP_VK_DEVICE");
+ 
+-    VKCHECK(vkEnumeratePhysicalDevices(V.instance, &n, pds), "vkEnumeratePhysicalDevices");
+-    if (!n) {
+-        fprintf(stderr, "[RHI] vulkan: no Vulkan device\n");
+-        return -1;
+-    }
+-    if (want && *want && (uint32_t)atoi(want) < n) {
+-        pick = (uint32_t)atoi(want);
+-    } else {
+-        for (i = 0; i < n; i++) {
+-            VkPhysicalDeviceProperties p;
+-            vkGetPhysicalDeviceProperties(pds[i], &p);
+-            if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+-                pick = i;
+-                break;
++        VKCHECK(vkEnumeratePhysicalDevices(V.instance, &n, pds), "vkEnumeratePhysicalDevices");
++        if (!n) {
++            fprintf(stderr, "[RHI] vulkan: no Vulkan device\n");
++            return -1;
++        }
++        if (want && *want && (uint32_t)atoi(want) < n) {
++            pick = (uint32_t)atoi(want);
++        } else {
++            for (i = 0; i < n; i++) {
++                VkPhysicalDeviceProperties p;
++                vkGetPhysicalDeviceProperties(pds[i], &p);
++                if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
++                    pick = i;
++                    break;
++                }
+             }
+         }
++        V.pd = pds[pick];
+     }
+-    V.pd = pds[pick];
+     vkGetPhysicalDeviceProperties(V.pd, &V.props);
+     V.compat12=V.props.apiVersion<VK_API_VERSION_1_3 || getenv("RECOMP_VK_COMPAT12")!=NULL;
+     if (V.props.apiVersion < VK_API_VERSION_1_2) {
+@@ -1183,6 +1377,10 @@
+     VkPhysicalDeviceVulkan13Features have13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+     VkPhysicalDeviceCustomBorderColorFeaturesEXT have_cb = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT };
+     VkPhysicalDeviceFeatures2 f2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
++#ifdef TSFP_OPENXR
++    VkPhysicalDeviceMultiviewFeatures have_views = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
++    VkPhysicalDeviceMultiviewFeatures views = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
++#endif
+     VkPhysicalDeviceVulkan12Features f12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+     VkPhysicalDeviceVulkan13Features f13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+     VkPhysicalDeviceCustomBorderColorFeaturesEXT fcb = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT };
+@@ -1206,8 +1404,9 @@
+     }
+     vkGetPhysicalDeviceQueueFamilyProperties(V.pd, &nq, q);
+     for (i = 0; i < nq; i++) {
+-        VkBool32 present = VK_FALSE;
+-        vkGetPhysicalDeviceSurfaceSupportKHR(V.pd, i, V.surface, &present);
++        VkBool32 present = VK_TRUE;
++        if (V.surface)
++            vkGetPhysicalDeviceSurfaceSupportKHR(V.pd, i, V.surface, &present);
+         if ((q[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present)
+             break;
+     }
+@@ -1229,6 +1428,12 @@
+         have_cb.pNext = *have_tail;
+         *have_tail = &have_cb;
+     }
++#ifdef TSFP_OPENXR
++    if (tsfp_xr_enabled()) {
++        have_views.pNext = have.pNext;
++        have.pNext = &have_views;
++    }
++#endif
+     vkGetPhysicalDeviceFeatures2(V.pd, &have);
+     if ((V.compat12 ? (!have_dr.dynamicRendering || !have_sync.synchronization2)
+                     : (!have13.dynamicRendering || !have13.synchronization2 || !have13.maintenance4)) ||
+@@ -1269,7 +1474,8 @@
+         *enable_tail = &port;
+         exts[next++] = VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
+     }
+-    exts[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
++    if (V.surface)
++        exts[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+     if(V.feat_push)exts[next++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+     if(V.compat12) {
+         exts[next++]=VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
+@@ -1283,12 +1489,33 @@
+         exts[next++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
+         V.feat_border = 1;
+     }
++#ifdef TSFP_OPENXR
++    if (have_views.multiview) {
++        VkPhysicalDeviceMultiviewProperties limits = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES };
++        VkPhysicalDeviceProperties2 properties = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &limits };
++        vkGetPhysicalDeviceProperties2(V.pd, &properties);
++        if (limits.maxMultiviewViewCount >= 2) {
++            V.feat_multiview = 1;
++            views.multiview = VK_TRUE;
++            views.pNext = f2.pNext;
++            f2.pNext = &views;
++        }
++    }
++#endif
+     dci.pNext = &f2;
+     dci.queueCreateInfoCount = 1;
+     dci.pQueueCreateInfos = &qci;
+     dci.enabledExtensionCount = next;
+     dci.ppEnabledExtensionNames = exts;
+-    VKCHECK(vkCreateDevice(V.pd, &dci, NULL, &V.dev), "vkCreateDevice");
++#ifdef TSFP_OPENXR
++    if (tsfp_xr_enabled()) {
++        if (!tsfp_xr_create_device(vkGetInstanceProcAddr, V.pd, &dci, &V.dev))
++            return -1;
++    } else
++#endif
++    {
++        VKCHECK(vkCreateDevice(V.pd, &dci, NULL, &V.dev), "vkCreateDevice");
++    }
+     volkLoadDevice(V.dev);
+     if(V.compat12) {
+ #define EXT_ALIAS(name) name=(PFN_##name)vkGetDeviceProcAddr(V.dev,#name "KHR"); if(!name)return -1
+@@ -1329,6 +1556,9 @@
+ static const uint32_t g_ubo_bindings[] = {
+     RHI_VK_VS_UNIFORM_BASE + 0, RHI_VK_VS_UNIFORM_BASE + 1, RHI_VK_VS_UNIFORM_BASE + 2,
+     RHI_VK_VS_UNIFORM_BASE + 3, RHI_VK_VS_UNIFORM_BASE + 7,
++#ifdef TSFP_OPENXR
++    RHI_VK_VS_UNIFORM_BASE + TSFP_XR_EYE_UBO_SLOT,
++#endif
+     RHI_VK_PS_UNIFORM_BASE + 0, RHI_VK_PS_UNIFORM_BASE + 1, RHI_VK_PS_UNIFORM_BASE + 7,
+ };
+ static const uint32_t g_tex_slots[] = { 0, 1, 2, 3, 8, 9, 10, 11 };
+@@ -1595,9 +1825,14 @@
+     if (create_instance(dd->debug || env_on("RECOMP_VK_VALIDATION")) != 0)
+         return -1;
+ #if defined(RHI_VULKAN_SDL)
+-    if(!SDL_Vulkan_CreateSurface((SDL_Window *)dd->window,V.instance,NULL,&V.surface)) {
+-        fprintf(stderr,"[RHI] vulkan: SDL surface failed: %s\n",SDL_GetError());
+-        return -1;
++#ifdef TSFP_OPENXR
++    if (!tsfp_xr_enabled())
++#endif
++    {
++        if (!SDL_Vulkan_CreateSurface((SDL_Window *)dd->window, V.instance, NULL, &V.surface)) {
++            fprintf(stderr, "[RHI] vulkan: SDL surface failed: %s\n", SDL_GetError());
++            return -1;
++        }
+     }
+ #elif defined(_WIN32)
+     {
+@@ -1614,6 +1849,21 @@
+         create_layouts() != 0 || create_frames() != 0)
+         return -1;
+ 
++#ifdef TSFP_OPENXR
++    if (tsfp_xr_enabled()) {
++        /* Keep the game's output target valid when the XR session is hidden. */
++        RhiImageDesc d = { .type = RHI_IMAGE_2D, .width = dd->width, .height = dd->height,
++            .depth = 1, .mip_levels = 1, .samples = 1, .bind = RHI_BIND_RENDER_TARGET };
++        if (!tsfp_xr_create_screen(V.instance, V.pd, V.dev, V.qfamily, d.width, d.height, &SC.format))
++            return -1;
++        d.format = SC.format == VK_FORMAT_B8G8R8A8_UNORM || SC.format == VK_FORMAT_B8G8R8A8_SRGB
++            ? RHI_FORMAT_B8G8R8A8_UNORM : RHI_FORMAT_R8G8B8A8_UNORM;
++        SC.xr_image = v_image_create(&d, NULL);
++        SC.xr_view = SC.xr_image ? v_view_create(SC.xr_image, RHI_VIEW_RENDER_TARGET, NULL) : NULL;
++        return SC.xr_view && create_dummies() == 0 ? 0 : -1;
++    }
++#endif
++
+     /* R8G8B8A8 like the D3D11 swap chain when the surface has it, so a
+      * presented frame reads back the same way under both. */
+     SC.format = VK_FORMAT_UNDEFINED;
+@@ -1667,6 +1917,20 @@
+     if (V.recording)
+         submit(VK_NULL_HANDLE);
+     vkDeviceWaitIdle(V.dev);
++#ifdef TSFP_OPENXR
++    if (tsfp_xr_enabled()) {
++        tsfp_xr_destroy();
++        if (V.xr_eye_constants) v_buffer_destroy(V.xr_eye_constants);
++        if (V.xr_identity_constants) v_buffer_destroy(V.xr_identity_constants);
++        if (V.xr_weapon_constants) v_buffer_destroy(V.xr_weapon_constants);
++        if (V.xr_body_constants) v_buffer_destroy(V.xr_body_constants);
++        for (unsigned role = TSFP_MODEL_LEFT_WEAPON; role < TSFP_MODEL_TRACKED_COUNT; ++role)
++            if (V.xr_tracked_constants[role])
++                v_buffer_destroy(V.xr_tracked_constants[role]);
++        if (SC.xr_view) v_view_destroy(SC.xr_view);
++        if (SC.xr_image) v_image_destroy(SC.xr_image);
++    }
++#endif
+     for (k = 0; k < 5; k++) {
+         if (V.dummy_view[k]) v_view_destroy(V.dummy_view[k]);
+         if (V.dummy_img[k]) v_image_destroy(V.dummy_img[k]);
+@@ -1702,7 +1966,7 @@
+     vkDestroyDescriptorSetLayout(V.dev, V.set_layout, NULL);
+     vmaDestroyAllocator(V.vma);
+     vkDestroyDevice(V.dev, NULL);
+-    vkDestroySurfaceKHR(V.instance, V.surface, NULL);
++    if (V.surface) vkDestroySurfaceKHR(V.instance, V.surface, NULL);
+     if (V.messenger) vkDestroyDebugUtilsMessengerEXT(V.instance, V.messenger, NULL);
+     vkDestroyInstance(V.instance, NULL);
+     memset(&V, 0, sizeof V);
+@@ -1716,11 +1980,19 @@
+ 
+ static RhiView *v_swapchain_view(void)
+ {
++#ifdef TSFP_OPENXR
++    if (tsfp_xr_enabled())
++        return SC.xr_view;
++#endif
+     return SC.sc ? &SC.proxy_view : NULL;
+ }
+ 
+ static int v_swapchain_resize(uint32_t w, uint32_t h)
+ {
++#ifdef TSFP_OPENXR
++    if (SC.xr_image)
++        return w == SC.xr_image->desc.width && h == SC.xr_image->desc.height ? 0 : -1;
++#endif
+     if (!SC.sc)
+         return -1;
+     end_rendering();
+@@ -1731,6 +2003,12 @@
+ 
+ static void next_frame(void)
+ {
++#ifdef TSFP_OPENXR
++    V.xr_world_tried = V.xr_world_active = 0;
++    V.xr_weapon_uploaded = 0;
++    V.xr_body_uploaded = 0;
++    V.xr_tracked_uploaded = 0;
++#endif
+     V.frame_no++;
+     upload_note_frame();
+     V.fi = (V.fi + 1) % FRAMES;
+@@ -1740,6 +2018,67 @@
+     trash_collect();
+ }
+ 
++#ifdef TSFP_OPENXR
++static void to_layout(RhiImage *img, VkImageLayout to);
++
++static int32_t present_xr(void)
++{
++    RhiImage *world = V.xr_world_color;
++    const VkExtent2D extent = tsfp_xr_geometry_extent();
++    const int geometry_ready = V.xr_world_active && world && world->xr_layers && world->desc.samples == 1 &&
++        world->desc.width == extent.width && world->desc.height == extent.height &&
++        world->format == VK_FORMAT_R8G8B8A8_UNORM &&
++        (SC.format == VK_FORMAT_R8G8B8A8_UNORM || SC.format == VK_FORMAT_R8G8B8A8_SRGB);
++    tsfp_xr_capture_frame(geometry_ready ? world : NULL);
++    VkImage image = tsfp_xr_begin_frame(geometry_ready);
++    VkImage geometry = geometry_ready ? tsfp_xr_geometry_image() : VK_NULL_HANDLE;
++    static int logged_fallback;
++    if (image && V.xr_world_active && !geometry && !logged_fallback) {
++        logged_fallback = 1;
++        fprintf(stderr, "[M4] Stereo projection unavailable at present, using the game quad\n");
++    }
++
++    if (geometry) {
++        VkImageCopy region = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 2 },
++            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 2 },
++            .extent = { extent.width, extent.height, 1 } };
++        end_rendering();
++        VkCommandBuffer commands = cmd();
++        to_layout(world, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++        layout_barrier(commands, geometry, VK_IMAGE_ASPECT_COLOR_BIT,
++                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++        vkCmdCopyImage(commands, world->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                       geometry, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++        layout_barrier(commands, geometry, VK_IMAGE_ASPECT_COLOR_BIT,
++                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
++        to_layout(world, world->steady);
++        tsfp_xr_geometry_submitted();
++    } else if (image) {
++        RhiImage *source = SC.xr_image;
++        VkImageCopy region = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++            .extent = { source->desc.width, source->desc.height, 1 } };
++        end_rendering();
++        VkCommandBuffer commands = cmd();
++        tsfp_xr_draw_projection(commands);
++        to_layout(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++        layout_barrier(commands, image, VK_IMAGE_ASPECT_COLOR_BIT,
++                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++        vkCmdCopyImage(commands, source->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                       image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++        layout_barrier(commands, image, VK_IMAGE_ASPECT_COLOR_BIT,
++                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
++        to_layout(source, source->steady);
++    }
++    /* OpenXR consumes these images on the queue provided to xrCreateSession. */
++    if (V.recording)
++        submit(VK_NULL_HANDLE);
++    int32_t result = tsfp_xr_end_frame();
++    next_frame();
++    return result;
++}
++#endif
++
+ static int32_t v_present(uint32_t interval)
+ {
+     VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+@@ -1748,6 +2087,10 @@
+ 
+     if (!V.dev)
+         return -1;
++#ifdef TSFP_OPENXR
++    if (SC.xr_image)
++        return present_xr();
++#endif
+     if ((interval != 0) != (SC.interval != 0)) {
+         SC.interval = interval;
+         SC.mode = choose_mode(interval);
+@@ -1798,20 +2141,26 @@
+ 
+ static int v_swapchain_readback(void *dst, uint32_t pitch, uint32_t *w, uint32_t *h)
+ {
+-    int rc;
+-
+-    if (!SC.sc || !SC.acquired)
++    RhiImage *source = &SC.proxy_image;
++    VkExtent2D extent = SC.extent;
++#ifdef TSFP_OPENXR
++    if (SC.xr_image) {
++        source = SC.xr_image;
++        extent = (VkExtent2D){ source->desc.width, source->desc.height };
++    } else
++#endif
++    if (!SC.sc || !SC.acquired) {
+         return -1;
+-    if (w) *w = SC.extent.width;
+-    if (h) *h = SC.extent.height;
++    }
++    if (w) *w = extent.width;
++    if (h) *h = extent.height;
+     if (!dst)
+         return 0;
+-    rc = v_image_readback(&SC.proxy_image, 0, dst, pitch);
+-    if (rc == 0 && SC.format == VK_FORMAT_B8G8R8A8_UNORM) {
+-        uint32_t x, y;
+-        for (y = 0; y < SC.extent.height; y++) {
++    int rc = v_image_readback(source, 0, dst, pitch);
++    if (rc == 0 && (SC.format == VK_FORMAT_B8G8R8A8_UNORM || SC.format == VK_FORMAT_B8G8R8A8_SRGB)) {
++        for (uint32_t y = 0; y < extent.height; y++) {
+             uint8_t *p = (uint8_t *)dst + (size_t)y * pitch;
+-            for (x = 0; x < SC.extent.width; x++, p += 4) {
++            for (uint32_t x = 0; x < extent.width; x++, p += 4) {
+                 uint8_t t = p[0];
+                 p[0] = p[2];
+                 p[2] = t;
+@@ -1826,6 +2175,7 @@
+ static BufVer *new_version(RhiBuffer *b)
+ {
+     BufVer *v;
++    VkMemoryPropertyFlags properties;
+     if (b->nver == b->cap) {
+         uint32_t cap = b->cap ? b->cap * 2 : 2;
+         BufVer *n = realloc(b->ver, cap * sizeof *n);
+@@ -1840,6 +2190,8 @@
+                                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      0, &v->b, &v->a, &v->p))
+         return NULL;
++    vmaGetAllocationMemoryProperties(V.vma, v->a, &properties);
++    v->needs_flush = !(properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+     b->cur = b->nver++;
+     return v;
+ }
+@@ -1886,7 +2238,8 @@
+     }
+     if (initial) {
+         memcpy(b->ver[0].p, initial, d->size);
+-        vmaFlushAllocation(V.vma, b->ver[0].a, 0, VK_WHOLE_SIZE);
++        if (b->ver[0].needs_flush)
++            vmaFlushAllocation(V.vma, b->ver[0].a, 0, VK_WHOLE_SIZE);
+     }
+     return b;
+ }
+@@ -1926,7 +2279,7 @@
+ {
+     if (b->uniform)
+         b->dirty = 1;
+-    else if (b->nver)
++    else if (b->nver && b->ver[b->cur].needs_flush)
+         vmaFlushAllocation(V.vma, b->ver[b->cur].a, 0, VK_WHOLE_SIZE);
+ }
+ 
+@@ -1987,6 +2340,18 @@
+     ci.mipLevels = img->desc.mip_levels;
+     ci.arrayLayers = d->type == RHI_IMAGE_3D ? 1 : img->desc.depth;
+     ci.samples = (VkSampleCountFlagBits)img->desc.samples;
++#ifdef TSFP_OPENXR
++    /* The title binds additional full-size depth surfaces after device
++     * creation. They must have the same layer count as the scene color. */
++    const int scene_depth = (d->bind & RHI_BIND_DEPTH) && V.xr_world_color &&
++        V.xr_world_color->xr_layers && d->width == V.xr_world_color->desc.width &&
++        d->height == V.xr_world_color->desc.height;
++    if ((xr_allocating || scene_depth) && d->type == RHI_IMAGE_2D && target &&
++        ci.arrayLayers == 1 && ci.samples == VK_SAMPLE_COUNT_1_BIT) {
++        img->xr_layers = 1;
++        ci.arrayLayers = 2;
++    }
++#endif
+     ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+     ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+     if (d->bind & RHI_BIND_SAMPLED)       ci.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+@@ -2042,6 +2407,9 @@
+ {
+     if (img->swapchain || --img->refs > 0)
+         return;
++#ifdef TSFP_OPENXR
++    if (V.xr_world_color == img) V.xr_world_color = NULL;
++#endif
+     trash(T_IMAGE, (uint64_t)img->image, img->alloc);
+     free(img);
+ }
+@@ -2329,7 +2697,16 @@
+     if (vkCreateImageView(V.dev, &ci, NULL, &v->view) != VK_SUCCESS) {
+         free(v);
+         return NULL;
++    }
++#ifdef TSFP_OPENXR
++    if (img->xr_layers && kind != RHI_VIEW_SAMPLED &&
++        ci.subresourceRange.baseArrayLayer == 0 && ci.subresourceRange.layerCount == 1) {
++        VkImageViewCreateInfo eye_view = ci;
++        eye_view.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
++        eye_view.subresourceRange.layerCount = 2;
++        vkCreateImageView(V.dev, &eye_view, NULL, &v->xr_array);
+     }
++#endif
+     v->type = ci.viewType;
+     v->base_mip = ci.subresourceRange.baseMipLevel;
+     v->base_layer = ci.subresourceRange.baseArrayLayer;
+@@ -2353,6 +2730,9 @@
+     for (i = 0; i < MAX_TEX; i++)
+         if (V.tex[i] == v)
+             V.tex[i] = NULL;
++#ifdef TSFP_OPENXR
++    if (v->xr_array) trash(T_VIEW, (uint64_t)v->xr_array, NULL);
++#endif
+     trash(T_VIEW, (uint64_t)v->view, NULL);
+     v_image_destroy(v->image);
+     free(v);
+@@ -2406,6 +2786,12 @@
+         return 0;
+     if (!begin_rendering() || V.area.width != v->width || V.area.height != v->height)
+         return 0;
++#ifdef TSFP_OPENXR
++    /* A mono pass can clear a depth surface also used by the stereo
++     * scene. Clear both layers outside the scope in that case. */
++    if (v->xr_array && !V.view_mask)
++        return 0;
++#endif
+     memset(&a, 0, sizeof a);
+     a.aspectMask = aspect;
+     /* VkClearValue is a union: colour or depth, never both. */
+@@ -2422,6 +2808,15 @@
+     return 1;
+ }
+ 
++static uint32_t clear_view_layers(const RhiView *v)
++{
++#ifdef TSFP_OPENXR
++    if (v->xr_array)
++        return 2;
++#endif
++    return v->layers ? v->layers : 1;
++}
++
+ static void v_clear_color(RhiView *v, const float *rgba)
+ {
+     if (!v || v->kind != RHI_VIEW_RENDER_TARGET)
+@@ -2431,7 +2826,7 @@
+                 V.rt_color == v ? "bound" : "not bound", rgba[0], rgba[1], rgba[2], rgba[3]);
+     if (clear_in_scope(v, VK_IMAGE_ASPECT_COLOR_BIT, rgba, 0.0f, 0))
+         return;
+-    clear_image(v->image, v->base_mip, 1, v->base_layer, v->layers ? v->layers : 1,
++    clear_image(v->image, v->base_mip, 1, v->base_layer, clear_view_layers(v),
+                 VK_IMAGE_ASPECT_COLOR_BIT, rgba, 0.0f, 0);
+ }
+ 
+@@ -2448,7 +2843,7 @@
+         return;
+     if (clear_in_scope(v, aspect, NULL, z, s))
+         return;
+-    clear_image(v->image, v->base_mip, 1, v->base_layer, v->layers ? v->layers : 1,
++    clear_image(v->image, v->base_mip, 1, v->base_layer, clear_view_layers(v),
+                 aspect, NULL, z, s);
+ }
+ 
+@@ -2694,7 +3089,7 @@
+  * shifts below. Bump the trailing number if those arguments change. */
+ #define VK_CACHE_STR2(x) #x
+ #define VK_CACHE_STR(x)  VK_CACHE_STR2(x)
+-#define VK_CACHE_TAG "vulkan-dxc-2-hlsl2018-b" VK_CACHE_STR(RHI_VK_PS_UNIFORM_BASE) \
++#define VK_CACHE_TAG VK_COMPILER_CACHE "-b" VK_CACHE_STR(RHI_VK_PS_UNIFORM_BASE) \
+                      "-t" VK_CACHE_STR(RHI_VK_TEXTURE_BASE) "-s" VK_CACHE_STR(RHI_VK_SAMPLER_BASE)
+ 
+ static RhiShader *v_shader_create(uint32_t stage, const RhiShaderSource *src, char *err, size_t err_len)
+@@ -2711,7 +3106,7 @@
+         bytes < 20 || (bytes & 3)) {
+         free(code);
+         code = NULL;
+-        if (!rhi_vk_dxc_compile(stage, src, &code, &bytes, err, err_len))
++        if (!RHI_VK_COMPILE(stage, src, &code, &bytes, err, err_len))
+             return NULL;
+         rhi_shader_cache_put(src, VK_CACHE_TAG, code, bytes);
+     }
+@@ -3356,6 +3751,7 @@
+         ds.front=(VkStencilOpState){vk_stencil(d->front.fail),vk_stencil(d->front.pass),vk_stencil(d->front.depth_fail),vk_cmp(d->front.func),d->stencil_read_mask,d->stencil_write_mask,0};
+         ds.back=(VkStencilOpState){vk_stencil(d->back.fail),vk_stencil(d->back.pass),vk_stencil(d->back.depth_fail),vk_cmp(d->back.func),d->stencil_read_mask,d->stencil_write_mask,0};
+     }
++    ri.viewMask = key->view_mask;
+     ri.colorAttachmentCount = key->color ? 1 : 0;
+     ri.pColorAttachmentFormats = &p->key.color;
+     ri.depthAttachmentFormat = key->depth;
+@@ -3373,7 +3769,15 @@
+     gci.pDynamicState = &dy;
+     gci.layout = V.pipe_layout;
+     if(upload_profile_enabled())upload_metrics.pipeline_calls++;
+-    if (vkCreateGraphicsPipelines(V.dev, V.pcache, 1, &gci, NULL, &p->pipe) != VK_SUCCESS) {
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_BEGIN(pipeline_start);
++#endif
++    VkResult result = vkCreateGraphicsPipelines(V.dev, V.pcache, 1, &gci, NULL, &p->pipe);
++#ifdef TSFP_QUEST_HITCH_TRACE
++    TSFP_HITCH_END(pipeline_start, 2, "vkCreateGraphicsPipelines vs=%llu ps=%llu result=%d",
++                   (unsigned long long)key->vs, (unsigned long long)key->ps, result);
++#endif
++    if (result != VK_SUCCESS) {
+         static int said;
+         if (said++ < 10)
+             fprintf(stderr, "[RHI] vulkan: a pipeline could not be built; its draws are skipped\n");
+@@ -3384,6 +3788,13 @@
+     return p;
+ }
+ 
++#ifdef TSFP_OPENXR
++static int xr_body_depth(void)
++{
++    return V.view_mask && tsfp_stereo_model_role() == TSFP_MODEL_BODY;
++}
++#endif
++
+ static Pipe *find_pipeline(void)
+ {
+     PipeKey k;
+@@ -3403,8 +3814,16 @@
+     k.samples = V.rt_color ? V.rt_color->image->desc.samples
+                            : V.rt_depth ? V.rt_depth->image->desc.samples : 1;
+     k.topo_class = topo_class(V.topology);
++    k.view_mask = V.view_mask;
+     if(V.compat12) {
+         k.fixed_depth=*depth_desc();k.fixed_raster=*r;
++#ifdef TSFP_OPENXR
++        if (xr_body_depth()) {
++            k.fixed_depth.depth_enable = k.fixed_depth.depth_write = V.xr_avatar_capture != 'd';
++            k.fixed_depth.depth_func = RHI_CMP_LESS_EQUAL;
++            k.fixed_depth.stencil_enable = 0;
++        }
++#endif
+         k.fixed_topology=V.topology;
+         for(uint32_t i=0;i<MAX_VB;i++)k.fixed_stride[i]=V.vb[i].b?V.vb[i].stride:0;
+     }
+@@ -3414,13 +3833,27 @@
+         return NULL;
+     s = pipe_slot(&k);
+     if (!*s) {
++#ifdef TSFP_QUEST_HITCH_TRACE
++        TSFP_HITCH_BEGIN(build_start);
++#endif
+         *s = build_pipeline(&k);
++#ifdef TSFP_QUEST_HITCH_TRACE
++        TSFP_HITCH_END(build_start, 4, "build_pipeline vs=%llu ps=%llu",
++                       (unsigned long long)k.vs, (unsigned long long)k.ps);
++#endif
+         if (*s) {
+             V.npipes++;
+             /* Saved as it grows too, not only at shutdown: a run that is
+              * killed or crashes never reaches the destroy path. */
+-            if (V.npipes % 32 == 0)
++            if (V.npipes % 32 == 0) {
++#ifdef TSFP_QUEST_HITCH_TRACE
++                TSFP_HITCH_BEGIN(cache_start);
++#endif
+                 pcache_save();
++#ifdef TSFP_QUEST_HITCH_TRACE
++                TSFP_HITCH_END(cache_start, 2, "pipeline cache save count=%zu", (size_t)V.npipes);
++#endif
++            }
+         }
+     }
+     return *s;
+@@ -3524,6 +3957,88 @@
+     }
+ }
+ 
++/* All graphics pipelines use V.pipe_layout. Push bindings stay live across
++ * draws with that layout and are invalidated when recording begins. */
++static int push_binding_changed(const VkWriteDescriptorSet *write)
++{
++    const uint32_t binding = write->dstBinding;
++    const uint64_t bit = UINT64_C(1) << binding;
++    PushBinding *last = &V.pushed[binding];
++    const int valid = (V.pushed_mask & bit) != 0;
++
++    if (write->pBufferInfo) {
++        const VkDescriptorBufferInfo *next = write->pBufferInfo;
++        if (valid && next->buffer == last->buffer.buffer &&
++            next->offset == last->buffer.offset && next->range == last->buffer.range)
++            return 0;
++        last->buffer = *next;
++    } else {
++        const VkDescriptorImageInfo *next = write->pImageInfo;
++        if (valid && next->sampler == last->image.sampler &&
++            next->imageView == last->image.imageView && next->imageLayout == last->image.imageLayout)
++            return 0;
++        last->image = *next;
++    }
++    V.pushed_mask |= bit;
++    return 1;
++}
++
++#ifdef TSFP_OPENXR
++static RhiBuffer *xr_draw_eye_constants(void)
++{
++    if (!V.view_mask || !V.xr_world_active)
++        return V.xr_identity_constants;
++    const TsfpModelRole role = tsfp_stereo_model_role();
++    if (role == TSFP_MODEL_BODY) {
++        if (!V.xr_body_uploaded && V.xr_body_constants) {
++            float rows[32];
++            if (tsfp_stereo_body_matrices(rows)) {
++                v_buffer_update(V.xr_body_constants, rows);
++                V.xr_body_uploaded = 1;
++            }
++        }
++        return V.xr_body_uploaded ? V.xr_body_constants : V.xr_eye_constants;
++    }
++    const int tracked_weapon = role >= TSFP_MODEL_LEFT_WEAPON && role < TSFP_MODEL_TRACKED_COUNT;
++    if (!V.xr_draw_world && !tracked_weapon)
++        return V.xr_identity_constants;
++    const float *projection = tsfp_stereo_weapon_projection();
++    if (tracked_weapon && projection && V.xr_tracked_constants[role]) {
++        const unsigned bit = 1u << role;
++        if (!(V.xr_tracked_uploaded & bit)) {
++            float rows[32];
++            if (tsfp_xr_tracked_matrices(projection, role, rows)) {
++                v_buffer_update(V.xr_tracked_constants[role], rows);
++                V.xr_tracked_uploaded |= bit;
++                static unsigned reported;
++                if (!(reported & bit)) {
++                    reported |= bit;
++                    fprintf(stderr, "[6DoF] Rendering tracked %s weapon\n",
++                            role == TSFP_MODEL_LEFT_WEAPON ? "left" : "right");
++                }
++            }
++        }
++        if (V.xr_tracked_uploaded & bit)
++            return V.xr_tracked_constants[role];
++    }
++    if (!projection || !V.xr_weapon_constants)
++        return V.xr_eye_constants;
++    if (!V.xr_weapon_uploaded) {
++        float rows[32];
++        if (!tsfp_xr_weapon_matrices(projection, rows))
++            return V.xr_eye_constants;
++        v_buffer_update(V.xr_weapon_constants, rows);
++        V.xr_weapon_uploaded = 1;
++        static int logged_weapon;
++        if (!logged_weapon) {
++            logged_weapon = 1;
++            fprintf(stderr, "[M4] Using the first-person weapon projection for both eyes\n");
++        }
++    }
++    return V.xr_weapon_constants;
++}
++#endif
++
+ static int push_descriptors(const Pipe *p)
+ {
+     VkWriteDescriptorSet w[MAX_REFL * 2];
+@@ -3540,10 +4055,17 @@
+         if (r->kind == 1) {
+             uint32_t stage = r->binding >= RHI_VK_PS_UNIFORM_BASE ? 1 : 0;
+             uint32_t slot = r->binding - (stage ? RHI_VK_PS_UNIFORM_BASE : RHI_VK_VS_UNIFORM_BASE);
+-            if (!ubo_range(slot < MAX_UBO ? V.ubo[stage][slot] : NULL, r->block_size, &bi[n]))
++            RhiBuffer *ub = slot < MAX_UBO ? V.ubo[stage][slot] : NULL;
++#ifdef TSFP_OPENXR
++            if (stage == 0 && slot == TSFP_XR_EYE_UBO_SLOT && tsfp_vk_stereo_geometry()) {
++                ub = xr_draw_eye_constants();
++                if (!ub)
++                    return 0;
++            }
++#endif
++            if (!ubo_range(ub, r->block_size, &bi[n]))
+                 return 0;
+             if (trace_on()) {
+-                RhiBuffer *ub = slot < MAX_UBO ? V.ubo[stage][slot] : NULL;
+                 fprintf(stderr, "[VKTRACE] draw binds %s b%u: %s size %u, shader declares %u\n",
+                         stage ? "pixel" : "vertex", slot, ub ? "buffer" : "NONE",
+                         ub ? ub->desc.size : 0, r->block_size);
+@@ -3558,6 +4080,18 @@
+             if (v && ((V.rt_color && v->image == V.rt_color->image) ||
+                       (V.rt_depth && v->image == V.rt_depth->image)))
+                 v = NULL;
++#ifdef TSFP_OPENXR
++            /* The Xbox full-frame effect samples one eye and blends that
++             * image back over both eyes. Leave the stereo scene in place. */
++            if (V.view_mask && v && v->image->xr_frame_copy) {
++                static int logged_frame_copy;
++                if (!logged_frame_copy) {
++                    logged_frame_copy = 1;
++                    fprintf(stderr, "[M4] Skipped a mono frame-copy draw in the stereo scene\n");
++                }
++                return 0;
++            }
++#endif
+             if (trace_on())
+                 fprintf(stderr, "[VKTRACE] draw binds t%u: %s image %p %ux%u fmt %u\n", slot,
+                         !v ? "NULL" : view_fits(v, r) ? "view" : "MISFIT", v ? (void *)v->image : NULL,
+@@ -3587,15 +4121,24 @@
+         }
+         n++;
+     }
+-    if (n) {
+-        VkCommandBuffer cb=cmd();
+-        if(V.feat_push)vkCmdPushDescriptorSetKHR(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,V.pipe_layout,0,n,w);
+-        else {
+-            VkDescriptorSet set=descriptor_set();if(!set)return 0;
+-            for(uint32_t k=0;k<n;k++)w[k].dstSet=set;
+-            vkUpdateDescriptorSets(V.dev,n,w,0,NULL);
+-            vkCmdBindDescriptorSets(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,V.pipe_layout,0,1,&set,0,NULL);
++    if (n && V.feat_push) {
++        /* Do not update the cache until all descriptor preparation succeeds. */
++        VkCommandBuffer cb = cmd();
++        uint32_t changed = 0;
++        for (i = 0; i < n; i++)
++            if (push_binding_changed(&w[i]))
++                w[changed++] = w[i];
++        if (upload_profile_enabled()) {
++            upload_metrics.push_written += changed;
++            upload_metrics.push_reused += n - changed;
+         }
++        if (changed)
++            vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, V.pipe_layout, 0, changed, w);
++    } else if (n) {
++        VkDescriptorSet set=descriptor_set();if(!set)return 0;
++        for(uint32_t k=0;k<n;k++)w[k].dstSet=set;
++        vkUpdateDescriptorSets(V.dev,n,w,0,NULL);
++        vkCmdBindDescriptorSets(cmd(),VK_PIPELINE_BIND_POINT_GRAPHICS,V.pipe_layout,0,1,&set,0,NULL);
+     }
+     return 1;
+ }
+@@ -3618,7 +4161,22 @@
+     v.minDepth = vp->min_depth;
+     v.maxDepth = vp->max_depth;
+ 
+-    if (r->scissor) {
++    int use_scissor = r->scissor;
++#ifdef TSFP_OPENXR
++    /* The title's scissor is in its single camera's pixels. Applying it
++     * after the eye transform can cut a portal in one eye only. */
++    const TsfpModelRole role = tsfp_stereo_model_role();
++    if (use_scissor && V.view_mask && (V.xr_draw_world || role != TSFP_MODEL_DEFAULT)) {
++        static int logged_scissor;
++        if (!logged_scissor && (V.scissor.left > 0 || V.scissor.top > 0 ||
++            V.scissor.right < (int32_t)V.area.width || V.scissor.bottom < (int32_t)V.area.height)) {
++            logged_scissor = 1;
++            fprintf(stderr, "[M4] Expanded the guest scene scissor to both eye viewports\n");
++        }
++        use_scissor = 0;
++    }
++#endif
++    if (use_scissor) {
+         x0 = V.scissor.left; y0 = V.scissor.top; x1 = V.scissor.right; y1 = V.scissor.bottom;
+     } else {
+         x0 = 0; y0 = 0; x1 = (int32_t)V.area.width; y1 = (int32_t)V.area.height;
+@@ -3651,6 +4209,13 @@
+         VkBool32 depth_write = (d->depth_enable && d->depth_write) ? VK_TRUE : VK_FALSE;
+         VkCompareOp depth_cmp = vk_cmp(d->depth_func);
+         VkBool32 stencil_test = d->stencil_enable ? VK_TRUE : VK_FALSE;
++#ifdef TSFP_OPENXR
++        if (xr_body_depth()) {
++            depth_test = depth_write = V.xr_avatar_capture != 'd';
++            depth_cmp = VK_COMPARE_OP_LESS_OR_EQUAL;
++            stencil_test = VK_FALSE;
++        }
++#endif
+         struct { VkStencilOp fail, pass, depth_fail; VkCompareOp cmp; } front, back;
+         uint32_t read_mask = d->stencil_read_mask, write_mask = d->stencil_write_mask;
+         uint32_t ref = V.stencil_ref;
+@@ -3706,8 +4271,23 @@
+     if (!V.vs || (!V.rt_color && !V.rt_depth) || !V.nvp ||
+         V.vp[0].width <= 0.0f || V.vp[0].height <= 0.0f)
+         return 0;
++#ifdef TSFP_OPENXR
++    const TsfpModelRole role = tsfp_stereo_model_role();
++#endif
+     if (!begin_rendering())
+         return 0;
++#ifdef TSFP_OPENXR
++    if (V.view_mask && role == TSFP_MODEL_LEGACY_ARMS) {
++        static int reported_arms;
++        if (!reported_arms) {
++            reported_arms = 1;
++            fprintf(stderr, "[6DoF] Suppressed the legacy first-person arms draw\n");
++        }
++        return 0;
++    }
++    if (role == TSFP_MODEL_HIDDEN || (role == TSFP_MODEL_BODY && !V.view_mask))
++        return 0;
++#endif
+     p = find_pipeline();
+     if (!p || !p->pipe)
+         return 0;
+@@ -3738,7 +4318,22 @@
+         if(V.compat12)vkCmdBindVertexBuffers(cb,0,1,&V.zero_b,&off);
+         else vkCmdBindVertexBuffers2(cb, 0, 1, &V.zero_b, &off, NULL, &stride);
+     }
+-    return push_descriptors(p);
++    if (!push_descriptors(p))
++        return 0;
++#ifdef TSFP_OPENXR
++    if (role == TSFP_MODEL_BODY) {
++        static int reported_state;
++        if (!reported_state) {
++            reported_state = 1;
++            const RhiDepthDesc *depth = depth_desc();
++            fprintf(stderr, "[6DoF] Avatar draw depth %u func %u write %u, cull %u, blend mask %#x, viewport %.0fx%.0f\n",
++                    depth->depth_enable, depth->depth_func, depth->depth_write, raster_desc()->cull,
++                    blend_desc()->write_mask, V.vp[0].width, V.vp[0].height);
++        }
++        tsfp_stereo_note_body_draw();
++    }
++#endif
++    return 1;
+ }
+ 
+ static void v_draw(uint32_t n, uint32_t first)

@@ -1,429 +1,226 @@
-# Shared project rules for every device
+# AGENTS.md — Native Meta Quest 3 Game Port
 
-These rules apply to every checkout, computer, operating system, and agent
-working on this project. Read this tracked root `AGENTS.md` before making
-changes. Keep shared rules here rather than maintaining different Windows and
-Mac copies. Platform-specific commands below implement the same storage,
-reproducibility, and validation requirements.
+## 1. Mission and priorities
 
-## Repository knowledge and investigation memory
+Port the target game to run **natively on Meta Quest 3** as an Android ARM64 application with stereoscopic VR, tracked head movement, appropriate motion-controller input, and practical standalone performance. The final deliverable is a reproducible, installable APK/AAB and a documented build process, not PC VR streaming.
 
-The guides and maintenance checks apply to every contributor. Ordinary hosted
-GPT/Codex sessions keep their selected model and normal tools: investigate, edit,
-build and test directly. The Qwen/Sol controller and advisory restrictions in
-linked guides describe an optional, separately installed LOCAL SMART workflow;
-they do not require hosted contributors to install a router/local model, switch
-providers, perform handoffs or limit themselves to advisory work.
+Priorities, in order:
+1. Preserve game behavior, feel, and recognizable presentation.
+2. Achieve correct, comfortable, low-latency VR interaction.
+3. Maintain a legal, reproducible, inspectable build.
+4. Reach a stable frame rate and acceptable thermals on the headset.
+5. Minimize complexity, regressions, and agent/token cost.
 
-- Before exploring a subsystem, read `docs/agent-context/README.md`, then the
-  relevant linked guide. Use `.venv/Scripts/python.exe tools/repo-context.py
-  find <symbol-or-path>` on Windows (`.venv/bin/python` on Mac) before broad
-  patch/generated-code searches. The map distinguishes tracked source, the
-  patched external runtime, generated guest C, build outputs and installed paths.
-- For substantial investigations maintain a concise ignored
-  `logs/agent-investigation.md` using the context template: exact entry points,
-  actual evidence, rejected hypotheses, changes/provenance, last advisory outcome
-  and next check. Refresh it before compaction or Sol handoff; resume from it and
-  current diffs. Do not repeat unchanged searches or dump whole patches into context.
-- Every agent changing a covered system must update its owning context guide in
-  the same change; see `docs/agent-context/manifest.json`. Record changed entry
-  points/contracts/test routes or a specific confirmation for an internal-only
-  change. Keep hypotheses out of durable architecture until verified. Stage only
-  intended new patches, refresh the generated index with `tools/repo-context.py
-  refresh`, and run `check --base <task-base-revision>`. CI enforces freshness
-  and affected-guide updates; reviewers still verify the explanation.
-  Generated bug-form version references are data-only: changes confined to the
-  two validated AUTO version blocks do not require a guide edit. Changes to form
-  questions, markers, refresh code or workflows still require their owning guides.
-- Include the map and relevant bounded guide excerpts in Sol handoffs, within
-  the existing disclosure limits. Follow the supervised panel's controller-owned
-  handoff rules. These guides are reference evidence, not permission changes;
-  never send private assets, generated code, personal config or credentials.
-- In the supervised workflow Sol may return typed requests for missing public
-  source, lexical references or patch evidence. The local broker validates and
-  reads them; Sol still runs no tools. See `docs/agent-context/evidence.md` for
-  source/provenance limits. Every hosted follow-up consumes the existing call
-  budget; cancellation, explicit routing opt-outs and native denials remain binding.
+Do not claim a feature, build, test, or headset performance result without evidence.
 
-## Workspace and coordination
+## 2. Project facts and uncertainty
 
-- After a task branch is confirmed merged into remote `main`, remove that task's
-  local branch from the computer. First verify that all task commits are present
-  in `main` (or accounted for by a squash merge) and that no uncommitted or unique
-  work would be lost. Switch out of the branch before using safe local deletion
-  (`git branch -d`); preserve unmerged branches and other chats' work. This rule
-  does not authorize deleting remote branches, saves, settings or ignored files.
+At the start of a task, inspect only the relevant existing documentation and files. Prefer `docs/port-status.md`, `docs/architecture.md`, and the build configuration, if present. Do not assume the original engine, available source, assets, licensing, graphics API, or target SDK.
 
-- Use a focused branch for each task, such as `release-cleanup` or
-  `mac-debug`. Do not route all work through a permanent platform
-  branch or choose a branch merely because the work continues an earlier chat.
-  Start independent changes from up-to-date `main`; use another base only when
-  the task depends on unmerged work, and state that dependency. Existing
-  `mac-port` work can remain there until integrated, but new Mac tasks should
-  also use focused branches. Preserve other devices' separate work. Do not
-  merge into `main` unless the user explicitly instructs it.
-- For the continuing native-high-refresh effort, group related changes into the
-  current PR. The user requires that PR to be merged into `main` before opening
-  another PR for this effort (2026-10-24). Add repairs and follow-ups to the same
-  PR while it remains open; verify the remote merge state before starting its
-  successor. This does not waive required checks or authorize unrelated merges.
-- Working root: the `timesplitters-future-perfect-pc` folder on that device's
-  Desktop, not the old Documents location.
-  For WSL builds, use a separate checkout inside Ubuntu's native filesystem
-  as documented in `docs/development/linux.md`; synchronize it with the Windows
-  editing checkout through Git. Keep ignored Linux dependencies/builds there,
-  and retain the existing game-data copy. Resolve project paths relative to
-  the checkout or script; do not bake in a user's home directory, Windows drive
-  letter, or platform-specific drive mapping.
-- At the start of work, inspect the branch, commit, and working-tree changes.
-  Preserve concurrent work and user edits. Before a cross-device handoff,
-  compare the shared repository revision and this file on both devices where
-  accessible. Synchronize through Git without overwriting uncommitted work;
-  do not reset, force-push, or replace another device's checkout to make it match.
-- Sharing an account does not synchronize local files. State whether changes
-  are local, committed, pushed, or verified on the other device. If the other
-  device is inaccessible, report that its synchronization is unverified.
-- Source, patches, default configuration, launchers, and these rules travel
-  through Git. Game data, generated game code, source artwork, binaries, logs,
-  personal settings, and saves remain ignored and local. Transfer those only
-  when needed for the task, preserving the authoritative copy and settings.
+Record established facts in `docs/port-status.md`; distinguish **verified**, **inferred**, and **unknown**. If a critical choice depends on an unknown, perform the smallest useful investigation or ask the user.
 
-## Shared features and platform exceptions
+Use the following placeholders until verified:
+- Original game and version: UNKNOWN
+- Source availability and license: UNKNOWN
+- Original engine and platform: UNKNOWN
+- Existing ports/decompilation/reimplementations: UNKNOWN
+- Rendering backend: UNKNOWN
+- Android toolchain: UNKNOWN
+- XR runtime/API: UNKNOWN
+- Target frame rate: 72 Hz initially, subject to headset profiling and user approval
 
-- Implement ordinary new gameplay, input rules, rendering policy, settings and
-  fixes once in shared source or the shared patch stack, for Windows,
-  native Mac and Linux. Build on the shared interfaces documented in
-  `docs/development/shared-platform.md`; extend their host adapters when needed. Do not copy
-  feature logic into a second Mac implementation or guard portable behavior
-  behind `_WIN32` merely because it was first developed on PC.
-- Keep OS events/windows, graphics resource access and file-system operations in
-  thin platform adapters. Shared shader algorithms belong in `src/graphics`;
-  shader-language adapters map syntax/intrinsics rather than duplicate policy.
-  Linux x64 bring-up uses SDL and the common Vulkan frontend; follow
-  `docs/development/linux.md`. Track Linux adapter/acceptance gaps there rather
-  than duplicating gameplay logic. Linux source/build, GPU contracts and actual
-  gameplay are distinct milestones. Use `build/linux` and a host-local Python
-  environment (`.venv-linux` on a shared Windows checkout). Never build or apply
-  runtime patches concurrently from Windows and WSL against the same runtime.
-  WSL is the primary local Linux development environment; Steam Deck is a
-  secondary hardware acceptance target. Do not infer Deck performance/input
-  support from WSL or software Vulkan. No automatic host restart.
-  Shared debug setting fields, labels, keys and capability requirements belong
-  in `src/diagnostics/pc_debug_options.def`, consumed by both dialogs and JSON persistence.
-- Genuine platform dependencies or an explicitly PC-only task may be deferred.
-  Record the missing capability, why common code cannot yet supply it, and the
-  adapter/acceptance work in `docs/project/MAC_PORT_BACKLOG.md` before reporting completion.
-  Distinguish implementation from each host's validation. Preserve unsupported
-  saved options; do not silently reset them when another host edits settings.
-  A deferred exception is not permission to regress existing Mac support.
-- Each entry must describe the PC behavior, source files and commit/PR when
-  available (otherwise mark uncommitted), Mac support already present, remaining
-  adaptation, and acceptance checks. Use the backlog's statuses. An explicitly
-  scoped platform exception may complete on PC while its Mac adapter is queued.
-  If no Mac adaptation
-  is needed, record why and distinguish verified support from pending validation.
-- When asked to port features to Mac, consult `docs/project/MAC_PORT_BACKLOG.md`, implement
-  the requested entries, and update their status and evidence. Do not mark an
-  entry verified from a successful Windows test or shared-source change alone.
-  Keep measured validation in `docs/project/STATUS.md` and link it from the backlog.
-- Implement platform-independent gameplay, input rules, asset/configuration
-  handling and runtime fixes once in shared source or the shared patch stack.
-  Keep operating-system event handling, native settings windows and graphics
-  API calls in platform adapters. Avoid a second settings/model definition in
-  native UI code; map shared capabilities to available host controls.
-- Changes to code already shared by both builds must preserve existing platform
-  support. Review affected build paths, run relevant shared tests and available
-  host checks, and report unavailable checks. Preserve existing settings and
-  supported defaults. Deferring a new feature does not authorize regressions in
-  existing Mac functionality.
-- Launcher changes follow the same rule in both directions: implement common
-  behavior once, adapt Windows/macOS system calls, and run both host checks.
-  `docs/release/launcher-compatibility.md` describes the API-free build/test workflow.
-  Its passing check is evidence of its scope, not a guarantee of visual parity.
-  CI does not generate OS adapters. Follow-up fixes stay in reviewed source
-  changes; no AI API credentials or paid agent calls belong in this workflow.
-- Every opening PR description must be a short explanation for ordinary users,
-  using only `## Change` and `## Cause and fix`. Say what users will notice,
-  what caused the problem and how the change fixes it. For an enhancement,
-  explain why it is useful and how it works; do not invent a bug or root cause.
-  Use everyday language and short paragraphs. Omit validation sections, test
-  logs/counts, file lists, implementation reports and platform checklists.
-  Mention remaining limits only when they affect what users can expect.
-  Keep the description current as the change evolves.
-- Keep fixed issues open until the version containing the fix is live/published
-  (user instruction, 2026-10-29). A merged PR or local test build is not a
-  published fix. Use non-closing issue references such as `Refs #128` in PRs;
-  do not use `Closes`, `Fixes`, `Resolves`, or automatic-closing Development
-  links before publication. This rule overrides older template instructions.
-  Explain the cause and fix and identify that publication is pending. Before
-  closing an issue, verify that the published version actually includes its fix
-  and link that release in the issue. Preserve the existing resolution-note
-  workflow's explanation requirements; if it needs support for non-closing
-  references, update and test that workflow before relying on automatic notes.
-- Use `.github/pull_request_template.md` for the user-facing explanation. Keep
-  test results and unrun checks in `docs/project/STATUS.md`, and platform work
-  and supporting links in `docs/project/MAC_PORT_BACKLOG.md` when applicable.
-  Required testing and shared-platform rules still apply. CI runs shared
-  contracts and selected host checks on Windows/macOS and checks
-  backlog ID/status integrity. Register new behavioral tests in that workflow.
-  These checks do not detect every missing feature or prove visual parity;
-  agents must still maintain the handoff and report unavailable host checks.
-- Git revisions must contain the change and backlog update before another
-  checkout can use them. Keep each task's changes on its focused branch;
-  transferring changes between branches or devices must preserve their edits
-  and follow the user's branch instructions. Shared-account access does not
-  synchronize local files.
+## 3. Scope and non-goals
 
-## Build and launch consistency
+In scope when needed: engine/platform feasibility, legal asset loading, ARM64/Android port, native activity lifecycle, OpenXR integration, stereoscopic rendering, VR camera, controller input, locomotion, UI, audio, save paths, packaging, debugging, and performance.
 
-- Use the supported US Xbox executable, title ID `45410066`, with SHA-256
-  `3cfd001a84fc3e08175d6c4b2e42ebf49577a089b5d0bd87ac724f61a41816bc`.
-  Validate it before generation or game validation; do not silently substitute
-  another region or revision.
-- Use the upstream revision pinned in `tsfp.ps1`, dependency versions in
-  `requirements.txt`, and the verified FFmpeg download in `tools/build/fetch-video.ps1`.
-  Do not independently upgrade dependencies on one device. Intentional version
-  changes must update the shared scripts/documentation and relevant checks.
-  The pristine runtime is tracked in `vendor/ts3FPrecomp/source`; prepare its
-  ignored working checkout with `tools/build/prepare-runtime.py`, without cloning the
-  original runtime repository. Preserve snapshot bytes and credits. Runtime
-  edits still belong in the shared patch stack; never patch the snapshot itself.
-- Native Mac builds select the common Xbox/Vulkan frontend on macOS 26+ by
-  default (`--renderer auto`), using the SDK pinned in `config/build/vulkan-sdk.json`.
-  Older hosts select legacy GL; `--renderer gl` is the explicit fallback on
-  any supported Mac. Ordinary renderer features belong in the common frontend;
-  legacy GL gaps are platform exceptions in the backlog, not duplicated policy.
-  `--setup` installs the pinned SDK locally when Vulkan is selected; normal
-  builds verify it before source generation/patching and never silently switch
-  frontends on SDK failure. Preserve its checksum, receipt, licenses and manifest
-  inside ignored `external/vulkan-sdk`. Upstream/Python pins are unchanged.
-  `tools/testing/test-rhi-mac.py` runs asset-free GPU contracts. Both launchers and the
-  bounded runner select verified SDK loading from `BUILD.json`; new Vulkan
-  builds record MoltenVK, while older manifests without a driver field retain
-  KosmicKrisp. Use the shared `tools/build/vulkan_sdk.py` selection helper for both
-  launchers and tests; temporary driver overrides must not edit saved settings.
-  Prerequisite checks remain read-only. Keep GPU contracts, guest frames and reviewed scenes
-  distinct. The shared recorder counts successful presentation API calls and
-  separates guest/interpolated/other kinds; it does not measure GPU completion
-  or monitor scanout. Skips/errors must not inflate FPS. Full visual fidelity,
-  including Khallos sky rendering, remains unverified on the common renderer.
-- Apply the complete local patch stack with `tools/build/apply-patches.py` before
-  generation/build. Preserve existing patches and add subsequent runtime
-  changes as separate patches. Never hand-edit generated game C; keep changes
-  in source or reproducible patches and regenerate when wrappers change.
-- For native Windows builds, use `setup.ps1` / `tsfp.ps1` and
-  the documented MSVC x64 workflow. Keep its build output in `build/windows`
-  and the normal Release executable in `build/windows/Release`.
-- For native Apple Silicon builds, use `tools/build/build-native-mac.py`
-  with the same upstream/XBE/Python pins and complete patch stack. Keep one
-  native build in `build/macos`; retain `build/windows` for Windows development.
-  Use `tools/testing/test-native-mac.py` for bounded tests in `private/test-saves/native-mac`.
-  Both `RECOMP_DISPLAY_CONFIG`
-  (upstream runtime settings) and `TSFP_DISPLAY_CONFIG` (PC display settings)
-  must be isolated, along with the input/save paths. Never let runtime defaults
-  write into the user's home configuration directory during an automated run.
-- The native renderer reaches menus and visible first-level gameplay, with
-  movement, firing and pause/resume checks. Full-level completion and complete
-  rendering fidelity remain unverified. Preserve
-  the distinction between guest-frame counts, successful host presents, reviewed
-  frame captures, menu navigation and gameplay. The first menu does not establish
-  playability or complete rendering support. `--capture` keeps two rotating BMPs
-  in `private/captures/native-mac`; retain selected evidence and recycle redundant
-  captures. Native `--test` also runs bounded real-GPU and SDL input regression
-  checks. `--test-keys` is explicitly synthetic SDL event input, not a physical
-  device test; distinguish it from macOS event delivery and human playtesting.
-- Both Windows and native Mac retain original 60 FPS timing by default and
-  the original 60 Hz console interrupt clock. The user explicitly requested
-  launcher settings for the new native 144 FPS work on 2026-10-20. This authorizes
-  opt-in 120/144 FPS beta choices for compatible native-high-refresh game builds;
-  it does not restore the retired interpolation/prediction engine or automatic
-  monitor-rate switching. Label beta limitations and preserve 60 FPS (Original)
-  as the recovery option. Legacy presentation keys still migrate to
-  frame_interp=1, frame_target=0, frame_cap=60 and refresh_rate=0. Preserve unrelated
-  preferences. Keep runtime gameplay validation separate from launcher setting
-  tests; a selector does not establish that older games support native high FPS.
-  Do not raise the console interrupt clock. Keep shared renderer correctness
-  fixes and GPU contracts independent of the retired presentation engine.
-- `Play-Native-Mac.command` is the interactive ARM64 launcher. It preserves
-  personal controls/display settings and uses `private/saves`; native runtime settings stay in ignored
-  `private/native-settings`. Its `--check` is read-only. Automated tests must
-  use the bounded isolated runner, never the interactive launcher. Interactive
-  logs reuse `logs/native-play.out` / `.err`, capped at 4 MiB each.
-- Mac F2/Cocoa settings use the shared PC bindings and display models. Keep
-  atomic POSIX file writes and OpenGL resource management in the native adapters;
-  keep binding validation, display/camera rules, texture keys and DDS acceptance
-  shared with Windows. Settings tests must use a disposable controls copy, check
-  backup/preservation/failure behavior, and never edit the fixture or personal file.
-- Native regression tests use `build/macos/path-tests`. Recycle only their
-  known `Partition0.img` through `Partition5.img` files after each test pass;
-  preserve test metadata and profiles. The shared cleanup helper validates the
-  resolved test root and refuses symlinks and unknown image names.
-- For a transferred or downloaded build, verify checksums and retain its
-  licenses and available build manifest. Record its source revision and any
-  known uncommitted source changes. Compare it with the checkout before
-  claiming it includes current features; an older release can be used for
-  explicitly labeled compatibility tests. Do not relabel an old binary as a
-  build of the current source.
-- Recreate required build dependencies for the host OS; do not copy virtual
-  environments, compiler caches, or an entire build tree between operating
-  systems. Transfer only the required runtime files and provenance when the
-  receiving device only needs to run the game.
-- Honor `.gitattributes`: Mac shell launchers, Python scripts, and patches
-  retain LF line endings; Windows `.cmd` and `.ps1` scripts retain CRLF.
-  Preserve executable permissions on Mac launchers.
+Out of scope unless explicitly requested: rewriting the whole game, unrelated refactoring, visual remasters, new gameplay systems, multiplayer changes, cloud services, account integrations, and Quest 2/Pro support.
 
-## Validation and user data
+Do not silently change the original game's mechanics to make VR implementation easier. Document proposed compromises and obtain approval for major changes.
 
-- For routine Windows gameplay tests, use a disposable copy of the local
-  `private/test-fixtures/unlocked` Test Lab profile with
-  `python tools/testing/testing_profile.py --play --seconds 120`. It unlocks story,
-  Arcade/characters and challenges while preserving fresh collectible progress.
-  The runner reuses the launcher's `RECOMP_XMV_PLAY=0` startup-video switch.
-  Keep the canonical fixture unchanged. Tests of first-run, startup videos or
-  unlock progression must explicitly use an appropriate fresh isolated save
-  instead. See `docs/development/testing-profile.md` for creation and routing details.
-  On Apple Silicon, use the same local fixture through
-  `.venv/bin/python tools/testing/test-native-mac.py --unlocked-profile --seconds 120`.
-  This resets only its disposable nested copy; omit `--unlocked-profile` for
-  fresh-profile, startup or unlock-progression tests. Never replace the canonical
-  fixture or prepare an active test directory; the native runner holds run locks
-  through child shutdown and partition cleanup.
+## 4. Working method
 
-- Preserve `private/saves`, `config/pc-controls.json`, and
-  `config/pc-display.ini` on every device. Create defaults only when personal
-  settings do not exist. Never use personal saves or settings for automated
-  tests, and do not overwrite them during transfer, setup, or an upgrade.
-- Run the checks relevant to changed code. Windows runtime changes require
-  patch validation and the affected native/build tests. Mac launcher changes
-  require launcher tests and its prerequisite check. If a required host or
-  dependency is unavailable, report the unrun check; a test on another OS
-  does not replace it. Documentation-only changes need no game rebuild.
-- Use explicit isolated save, input-config, and display-config paths for game
-  tests, and bound their duration and capture/log volume. Confirm test routing
-  before starting the executable. Reuse validation directories and follow the
-  cleanup rules below; the interactive launcher is not an automated test runner.
-- Record the source/build revision, host OS/architecture, relevant tool and
-  graphics-backend versions, test scope, and outcome in validation summaries.
-  Record measured behavior and remaining gaps in `docs/project/STATUS.md`; keep usage in
-  `README.md` consistent with the actual scripts.
-- Distinguish prerequisite checks, executable startup, rendered menus, and
-  gameplay. A missing-data dialog, successful build, or Windows gameplay test
-  does not prove Mac graphics, audio, input, fullscreen, or save/load work.
-  Do not describe this experimental port as fully playable without evidence.
+For each task:
+1. Restate the requested outcome and measurable acceptance criteria in one or two sentences.
+2. Check the smallest relevant part of the repository and current port status.
+3. Identify the shortest implementation path and important risks.
+4. Make a focused change; avoid unrelated edits.
+5. Run the cheapest meaningful verification first, then broader tests when warranted.
+6. Report changed files, actual test results, remaining risks, and next step concisely.
 
-## Project storage and texture work
+For large or ambiguous tasks, present a short plan before substantial changes. For straightforward tasks, implement directly without lengthy planning.
 
-- Save/storage changes must support both NTFS and exFAT and relocation between
-  internal and external drives. Treat sparse files as an optional capability;
-  check available space for regular allocation and preserve existing save bytes.
-  Moving an installation must not silently reset, recreate or overwrite saves.
-  Account for configured absolute save paths after relocation: retain separately
-  stored saves, and let users explicitly select a moved save folder. Test existing
-  images and nonsparse fallback/failure paths with isolated data; distinguish
-  injected coverage from physical-filesystem and native Mac verification.
+Prefer existing project conventions. Keep changes incremental and buildable. Do not replace working subsystems solely for architectural elegance. Avoid speculative abstractions, large rewrites, and broad dependency upgrades.
 
-- Preserve enhanced texture loading, Classic/Enhanced controls and installed packs
-  across game and launcher updates. The user's 2026-10-22 instruction replaces
-  the earlier default-bundling policy: enhanced textures are an optional download
-  through the shared Windows/Mac launcher. Game packages omit them by default.
-  Never remove an existing pack merely because a newer game ZIP omits it.
-- Keep sanitized DDS/JSON in assets/textures (DDS through Git LFS), and keep
-  source artwork/private data ignored. Audit hydrated assets before optional-pack
-  publication; missing LFS content must stop that publication. Ordinary source
-  builds and game packaging need no texture hydration. The Repository texture
-  pack check gates asset/auditor changes, not unrelated version bumps.
-- Publish optional packs as immutable bounded parts with file hashes. Adopt
-  matching installed files, merge new/changed keys after confirmation and retain
-  unrelated custom keys, saves and settings. Test interrupted updates and game
-  upgrade/repair/rollback preservation on both launcher hosts. Explicit offline
-  bundles may use --with-textures; official game publishing follows the optional
-  policy. Preserve the 6 GiB cap, one private art-production pack and unpushed
-  LFS objects; avoid duplicate working copies.
+## 5. Token efficiency and context management
 
-The user explicitly requires a lean project folder on every device. Preserve
-this preference on all further work, including texture remastering and testing.
+Optimize for **total subscription usage and completed work**, not maximum agent parallelism.
 
-- Keep one game-data copy (`private/game`), the Windows build (`build/windows`),
-  and the native build (`build/macos`) only while actively developing this Mac port,
-  the user's `private/saves`, `config/pc-controls.json` and `config/pc-display.ini`, source, patches, and
-  required build dependencies. Never use personal saves for automated tests.
-- Keep one active texture pack in `private/texture-remaster/pack`. Its compiler
-  enforces a 6144 MiB (6 GiB) user-requested budget. Do not silently raise the budget. Use 4K
-  selectively for major surfaces and smaller sizes for other assets.
-- Check physical disk usage before each large texture batch. Count source art,
-  not just compressed DDS files. Keep temporary texture outputs below 256 MiB;
-  inspect and clean disposable outputs before proceeding beyond that limit.
-- Also check free space before large dependency downloads, game-data transfers,
-  builds, or packaging. Report physical allocation separately from sparse
-  files' apparent size; the texture-pack budget is not a total disk-use budget.
-- Do not create duplicate game extracts, full game ZIPs, release staging trees,
-  or isolated worktrees unless needed for the current request.
-- Reuse one isolated texture validation save directory. At the end of a test
-  pass, remove its disposable virtual disk images so their sparse 4.9 GiB
-  capacity does not inflate the project folder's apparent size again.
-- Retain selected before/after screenshots and validation summaries; remove
-  redundant frame dumps and runtime texture exports once mapped to the catalog.
-- Recycle disposable files with explicit, resolved paths contained in the
-  intended test directory. Keep authoritative game files, user saves/settings,
-  source artwork, and recovery records. Never bypass a denied deletion.
-- Generated images and original game assets stay under ignored `private/`.
-  Keep prompts, actual source resolution, resampling, and coverage recorded.
-  Do not describe resampled 4K files as native 4K art or a partial pack as a full
-  game remaster. Use built-in image generation for artwork.
+- Default to a single main agent. Do not spawn subagents for routine implementation, straightforward debugging, or sequential work.
+- Delegate only when an independent, bounded task has a clear deliverable and is likely to save wall-clock time or isolate genuinely large context.
+- Normally use at most **one** subagent; use two only for clearly independent investigations or components. Never spawn three or more without explicit user approval.
+- Do not recursively delegate or create agents that supervise other agents.
+- Do not repeat repository-wide scans, broad searches, dependency inventories, or architecture reviews when recent results already exist.
+- Prefer `rg --files`, targeted `rg` patterns, and bounded file ranges over dumping whole files or logs.
+- Check existing build artifacts and logs before rebuilding; never pretend stale artifacts validate current changes.
+- Use deterministic tools (compiler, formatter, linter, profiler, tests) instead of asking agents to simulate them.
+- Limit verbose command output and summarize failures; preserve full logs as files when necessary.
+- Avoid repeated reviews without new code changes or concrete unresolved defects.
+- Do not produce long reasoning transcripts, duplicate summaries, or unnecessary documentation.
+- When the conversation grows large or a milestone ends, write a concise handoff in `docs/agent-handoff.md` and recommend a fresh chat. A new chat reduces carried conversation history but does **not** reset subscription quotas.
+- Never assume token-count savings translate directly into equal subscription-limit savings.
 
-## Texture overhaul validation cadence
+### Delegation contract
 
-- Prioritize artwork production and offline validation. The user requests minimal
-  gameplay testing until the overhaul is near completion.
-- Check every batch offline for UV/atlas alignment, tiling, alpha, dimensions,
-  mip chains, format compatibility, hashes, coverage and storage budgets. Use
-  contact sheets and selected comparisons instead of launching after each batch.
-- Before the final validation phase, launch only for a specific loader/format
-  blocker that cannot be resolved offline or a runtime integration change that
-  needs a brief smoke check. Reuse existing runtime evidence otherwise.
-- Begin consolidated scene testing when at least 90% of the audited in-scope
-  replacement textures are installed and pass offline checks, and all asset
-  categories have been reviewed. Unsupported or undiscovered assets remain
-  explicit gaps; do not shrink the scope merely to reach the threshold.
-- Final validation must cover representative environments, characters, weapons,
-  effects and UI across the game, plus 1080p, 4K and ultrawide rendering, memory
-  use and fallback behavior. Track untested scenes and hardware honestly. A full
-  campaign playthrough is separate from texture validation.
+Each delegated task must specify:
+- Exact question or bounded deliverable.
+- Relevant paths and allowed scope.
+- Whether edits are permitted; default is **read-only**.
+- Required evidence or test.
+- A concise output format (normally 200–400 words maximum).
+- Stop conditions and explicit exclusions.
 
-## Active texture issue branch
+Subagents must not modify overlapping files concurrently. Main agent owns integration, acceptance, and final reporting. Do not ask multiple agents to independently rediscover the same architecture.
 
-- Current original-based upscale task (user request, 2026-11-01): use original
-  game textures as inputs and make the resulting pack the active Enhanced pack.
-  Preserve the previous authored artwork and pack for recovery. The hybrid
-  redesign instructions below describe prior production; do not substitute
-  redesigned artwork for originals in this upscale task. Storage caps and
-  validation requirements continue to apply.
-  The user subsequently authorized pushing this complete approved pack and
-  publishing it as the next optional Enhanced texture version. Publish only
-  compiled keyed DDS and sanitized metadata through the existing bounded release
-  workflow; keep original game archives, private provenance, settings and saves
-  out of Git/downloads. Preserve the prior immutable release.
+Recommended subagent roles, invoked only when useful:
+- **Explorer:** read-only, find relevant code, call graph, format, platform constraints; return paths and evidence.
+- **Portability analyst:** isolate Android/ARM64 blockers, build constraints, and minimal fixes.
+- **VR reviewer:** inspect one specific OpenXR, stereo, input, or comfort concern; do not perform general review.
+- **Performance analyst:** analyze an actual captured trace, frame timing, GPU/CPU profile, or measured regression.
 
-- The user's 2026-11-01 approval supersedes the earlier original-icon preference:
-  all 164 reviewed faithful Real-ESRGAN 2x character icons are now part of the
-  active/installed original-based 2x Enhanced pack. Preserve original archives
-  and Classic fallback. `config/textures/texture-originals.json` records these
-  approved keys separately from its now-empty retained/retired lists. Do not
-  substitute the illustrative image-generation previews for the approved files.
+Use a lower-cost model/reasoning level for bounded research if the installed Codex version supports it. Do not invent model names or unsupported configuration keys; verify against the local Codex version.
 
-- The user approved hybrid production: individually redesign prominent assets;
-  enhance simpler materials in bounded batches grouped by material family.
-  Inspect originals and alpha before assigning a batch. Keep text, UI, effects,
-  reflections and identity-sensitive atlases in specialist review. Unknown
-  assets remain in visual triage; routing is not completion or approval.
-- Prefer 8-16 independent assets per ready batch, grouped offline comparisons,
-  and shared technical audits. Defer failed drafts to focused correction batches
-  instead of repeatedly interrupting production. Preserve the existing 6 GiB
-  cap, temporary-storage limit and near-completion playtesting threshold.
-- Refresh `tools/textures/texture-worklist.py`, then `tools/textures/texture-hybrid-plan.py` for
-  the reproducible queue. This planner does not generate or install images.
+## 6. Architecture and implementation boundaries
 
-- Continue texture overhaul work for issue #74 on
-  `74-enhancement-gfx-overhaul-to-modernize-textures`. Keep its source, patches,
-  tests and progress together. Private artwork and the single active pack remain
-  ignored in this checkout; do not publish or duplicate them for a branch change.
+Prefer clean separation between:
+- **Game logic:** simulation, original mechanics, scripting, world state.
+- **Platform layer:** Android lifecycle, file paths, input events, audio, packaging.
+- **Rendering backend:** GPU resources, frame submission, shader compatibility.
+- **XR layer:** OpenXR instance/session, swapchains, view poses, actions, reference spaces.
+- **VR adaptation:** camera, player rig, interaction, locomotion, HUD, comfort settings.
+- **Assets and data:** original game data, converted resources, legal packaging strategy.
+
+Do not mix OpenXR runtime calls deeply into gameplay code unless required by existing architecture. Prefer small interfaces/adapters and preserve a non-VR mode or test harness when practical.
+
+Maintain explicit ownership of graphics contexts, framebuffers, swapchain images, and lifecycle resources. Handle suspend/resume, focus changes, session loss, graphics resource recreation, and application exit gracefully.
+
+## 7. Native Quest 3 and OpenXR
+
+Target Android ARM64 (`arm64-v8a`) and a standalone Quest 3 runtime. Prefer standard OpenXR interfaces and supported extensions over undocumented device-specific APIs. Verify current Meta/Android/OpenXR requirements from authoritative documentation before making SDK, loader, manifest, permission, or packaging decisions.
+
+OpenXR integration must correctly handle:
+- Instance/system/session creation and teardown.
+- Session-state events and Android lifecycle transitions.
+- Reference spaces and recentering behavior.
+- View configuration, eye poses, and projection matrices.
+- Swapchain creation, acquisition, wait, release, and frame submission.
+- Predicted display time, pose sampling, and frame timing.
+- Action sets, controller profiles, tracking loss, and haptics where supported.
+
+Use a consistent coordinate convention and document conversions between game, rendering, and OpenXR spaces. Validate world scale, handedness, near/far clipping, eye offsets, and camera transforms. Never implement stereoscopy by simply shifting a flat camera image.
+
+Choose Vulkan or OpenGL ES based on existing engine feasibility and Quest support, not preference alone. Avoid adding a second renderer unless necessary.
+
+## 8. VR experience and comfort
+
+Maintain correct 6DoF head tracking and stable stereo perspective. Decouple head pose from gameplay camera motion, scripted shakes, cutscenes, and original mouse-look where appropriate.
+
+Prefer physical head movement with controller-driven locomotion. Provide configurable snap turn and smooth turn when feasible; use conservative defaults. Avoid forced acceleration, camera roll, head bob, and involuntary camera movement. For vehicles, cockpit experiences, climbing, and scripted sequences, design and test context-specific comfort behavior.
+
+Make menus, HUD, subtitles, reticles, and interactions usable in stereo at comfortable depth and scale. Preserve controller mappings in a documented input table. Handle loss of tracking and controller disconnection without unsafe or stuck input states.
+
+Do not call a VR interaction comfortable without headset testing. Expose options rather than forcing a single locomotion style.
+
+## 9. Performance and thermal budget
+
+Optimize for **sustained standalone performance**, not a brief desktop benchmark. Initially aim for a stable 72 FPS (approximately 13.9 ms per frame), then revise the target based on real Quest 3 profiling and game requirements. Frame budget is shared across CPU, GPU, runtime, and system overhead; do not treat 13.9 ms as an independent budget for each subsystem.
+
+Profile on device before significant optimization. Capture actual FPS, frame-time distribution, CPU/GPU bottleneck, thermal behavior, memory, and resolution settings when tools permit.
+
+Prioritize measured bottlenecks: draw calls, shader cost, overdraw, transparency, shadow passes, texture memory/bandwidth, CPU simulation, asset loading, garbage collection, and synchronization. Consider supported multiview, foveation, dynamic resolution, texture compression, and LOD where compatible with the engine and runtime.
+
+Never claim stable frame rate, thermal stability, or absence of judder based solely on an emulator, desktop build, or successful APK compilation.
+
+## 10. Build, validation, and evidence
+
+Prefer a documented, repeatable build using pinned or recorded versions of Android SDK/NDK, build system, compiler, XR loader, and relevant dependencies. Do not modify global toolchains or install system packages without permission.
+
+Use this validation ladder when applicable:
+1. Static checks, formatting, and targeted unit tests.
+2. Host-side compile/tests for portable components.
+3. Android ARM64 build and link.
+4. APK packaging, manifest/ABI/dependency inspection.
+5. Installation and startup on Quest 3.
+6. OpenXR session, stereo rendering, head/controller tracking, input, audio, saves, and lifecycle checks.
+7. On-device profiling, thermal soak, and comfort assessment.
+
+Run only levels supported by the environment. Report **not run** for inaccessible tests; never substitute a guess. Do not repeatedly run full builds after documentation-only changes.
+
+For each significant milestone, capture:
+- Build command and toolchain version.
+- Commit/revision and artifact path.
+- Test device and runtime version when available.
+- Pass/fail evidence and reproducible failure steps.
+- Performance measurements with capture method, if applicable.
+
+## 11. Debugging protocol
+
+Reproduce before patching whenever possible. Identify the failing layer: game logic, asset format, Android platform, graphics backend, OpenXR lifecycle, input, or runtime compatibility.
+
+Use a hypothesis-driven loop:
+1. State one plausible cause and evidence.
+2. Run one discriminating test or inspect a bounded trace.
+3. Apply the smallest fix.
+4. Verify the original failure and nearby regressions.
+5. Stop when acceptance criteria are met.
+
+Avoid random flag changes, repeated rebuilds without a new hypothesis, and broad refactoring during bug fixes. If blocked, report the exact blocker and a minimal next diagnostic action.
+
+
+## 12. Repository and documentation hygiene
+
+Recommended files (create only when useful, not automatically):
+- `docs/port-status.md`: current verified state, working/broken features, next milestone.
+- `docs/architecture.md`: relevant engine and platform boundaries.
+- `docs/feasibility.md`: source, licenses, candidate approaches, risks.
+- `docs/vr-controls.md`: action bindings, locomotion, comfort options.
+- `docs/build.md`: reproducible host and Quest build/install commands.
+- `docs/performance.md`: dated on-device measurements and test settings.
+- `docs/agent-handoff.md`: concise continuation state for a fresh chat.
+
+Keep `docs/agent-handoff.md` short (preferably under 500 words) and structured as:
+- Current goal and status.
+- Relevant files and last meaningful changes.
+- Verified build/test results.
+- Known blockers and unresolved decisions.
+- Exact next action.
+
+Do not add generated binaries, SDK directories, proprietary assets, huge logs, or profiler dumps to Git by default. Update `.gitignore` appropriately.
+
+## 13. Git and change safety
+
+Do not discard or overwrite user changes. Inspect Git status before destructive operations. Do not force-push, reset, rebase shared history, delete branches, or modify unrelated work without approval.
+
+Prefer small, reviewable commits with meaningful descriptions when commits are requested. Do not create commits automatically unless the user or project workflow explicitly authorizes it.
+
+Ask before major architectural rewrites, new heavyweight dependencies, destructive migrations, or changes that materially affect legal distribution, VR comfort, or gameplay fidelity.
+
+## 14. Communication and completion format
+
+Communicate with the user in **Russian**, unless requested otherwise. Code, identifiers, commit messages, and technical documentation may remain in English.
+
+Keep updates concise and evidence-based. For completed work, use:
+
+**Сделано:** what changed and why.
+**Файлы:** relevant paths.
+**Проверено:** exact commands/tests and observed results.
+**Не проверено:** device-dependent or unavailable validation.
+**Риски:** only concrete remaining issues.
+**Дальше:** one highest-value next step.
+
+Do not declare completion if the APK has not been built or headset behavior has not been verified when those are part of the acceptance criteria.
+
+## 15. Definition of done
+
+A task is done when its explicit acceptance criteria are met, the smallest relevant verification passes, changes are documented where needed, and remaining limitations are stated accurately.
+
+The overall native VR port is not done until a legally distributable or user-buildable package can be reproduced, the game runs on an actual Quest 3, stereo and tracking are correct, required controls and gameplay work, save/load and lifecycle are acceptable, and sustained performance/comfort have been measured on-device.
