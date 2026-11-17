@@ -284,7 +284,8 @@ void tsfp_stereo_probe_weapon(uint32_t address)
 
 const float *tsfp_stereo_weapon_projection(void)
 {
-    if (avatar.role == TSFP_MODEL_LEFT_WEAPON_PARTICLES || avatar.role == TSFP_MODEL_RIGHT_WEAPON_PARTICLES)
+    if (avatar.role == TSFP_MODEL_LEFT_WEAPON_PARTICLES || avatar.role == TSFP_MODEL_RIGHT_WEAPON_PARTICLES ||
+        avatar.role == TSFP_MODEL_MUZZLE_PARTICLES)
         return weapon.particle_projection;
     if (avatar.role == TSFP_MODEL_UPLINK_MAP)
         return weapon.map_projection;
@@ -1116,79 +1117,54 @@ TsfpModelRole tsfp_stereo_weapon_particles(uint32_t emitter)
         if (!has_shield)
             return TSFP_MODEL_DEFAULT;
     }
-    int matched_slot = -1;
-    const void *matched_source = NULL;
-    int matched_held = 0;
     if (in_camera && !owner) {
-        /* 000DFEC0 creates one-shot camera-space muzzle flashes without an owner pointer. */
-        XrVector3f emitter_pos;
-        memcpy(&emitter_pos, effect + 0x14u, sizeof emitter_pos);
-        float best_dist = 1e30f;
+        /* At 1C0CB0, 000DFEC0 spawns the burst from the camera-space
+         * copy of the redirected shot origin, including room offset. */
         for (unsigned slot = 0; slot < TSFP_AVATAR_HANDS; ++slot) {
             const unsigned hand = kept.slot_hand[slot];
-            const unsigned state = player_hand_state[slot];
-            const uint32_t id = word(player + state + 0x30u);
-            const uint32_t view_weapon = word(player + state + 0x54u);
-            const uint32_t instance = view_weapon ? render_model(&vm, view_weapon) : 0;
-            if (id == UINT32_MAX || !(avatar.posed_hands & (1u << hand)) ||
-                !current_weapon_bore(slot, entity, id) || !instance ||
-                instance != kept.particle_weapons[slot].instance)
+            const uint32_t id = word(player + player_hand_state[slot] + 0x30u);
+            if (!(avatar.posed_hands & (1u << hand)) || !current_weapon_bore(slot, entity, id))
                 continue;
-            const XrVector3f origin = tsfp_matrix_position(&kept.particle_weapons[slot].source);
-            XrVector3f delta;
-            XrVector3f_Sub(&delta, &emitter_pos, &origin);
-            const float dist = XrVector3f_Length(&delta);
-            if (matched_slot < 0 || dist < best_dist) {
-                best_dist = dist;
-                matched_slot = (int)slot;
-                matched_source = &kept.particle_weapons[slot].source;
-            }
-        }
-    } else {
-        for (unsigned slot = 0; slot < TSFP_AVATAR_HANDS; ++slot) {
-            const unsigned hand = kept.slot_hand[slot];
-            const unsigned state = player_hand_state[slot];
-            const uint32_t id = word(player + state + 0x30u);
-            const int shield_active = id == TSFP_WEAPON_FUTURE_SNIPER && word(player + state + 0x38u) == 1u;
-            if (id == UINT32_MAX || !(avatar.posed_hands & (1u << hand)) || !current_weapon_bore(slot, entity, id))
-                continue;
-            const void *source = NULL;
-            if (in_camera && owner == word(player + state + 0x54u)) {
-                const uint32_t instance = render_model(&vm, owner);
-                if (instance && instance == kept.particle_weapons[slot].instance)
-                    source = &kept.particle_weapons[slot].source;
-            } else if (shield_active && owner == word(player + state + 0x58u)) {
-                const uint32_t shield_instance = avatar.shield[slot] ? avatar.shield[slot] : render_model(&vm, owner);
-                source = model_camera_palette(&vm, shield_instance, 0);
-                if (!source && kept.particle_weapons[slot].instance)
-                    source = &kept.particle_weapons[slot].source;
-            }
-            /* The shield toggle also enables effects on the actor's separately
-             * attached rifle. Those particles arrive with the normal world view. */
-            const int held_shield = !in_camera && shield_active && held.model[slot] &&
-                guest_word(&vm, held.model[slot]) == owner;
-            if (source || held_shield) {
-                matched_slot = (int)slot;
-                matched_source = source;
-                matched_held = held_shield;
+            const void *projection = vm.resolve(vm.host, 0x0055FA40u, sizeof weapon.particle_projection, 0);
+            if (!projection)
                 break;
-            }
+            memcpy(weapon.particle_projection, projection, sizeof weapon.particle_projection);
+            return TSFP_MODEL_MUZZLE_PARTICLES;
         }
+        return TSFP_MODEL_DEFAULT;
     }
-    if (matched_slot >= 0) {
-        const unsigned slot = (unsigned)matched_slot;
+    for (unsigned slot = 0; slot < TSFP_AVATAR_HANDS; ++slot) {
         const unsigned hand = kept.slot_hand[slot];
         const unsigned state = player_hand_state[slot];
         const uint32_t id = word(player + state + 0x30u);
         const int shield_active = id == TSFP_WEAPON_FUTURE_SNIPER && word(player + state + 0x38u) == 1u;
+        if (id == UINT32_MAX || !(avatar.posed_hands & (1u << hand)) || !current_weapon_bore(slot, entity, id))
+            continue;
+        const void *source = NULL;
+        if (in_camera && owner == word(player + state + 0x54u)) {
+            const uint32_t instance = render_model(&vm, owner);
+            if (instance && instance == kept.particle_weapons[slot].instance)
+                source = &kept.particle_weapons[slot].source;
+        } else if (shield_active && owner == word(player + state + 0x58u)) {
+            const uint32_t shield_instance = avatar.shield[slot] ? avatar.shield[slot] : render_model(&vm, owner);
+            source = model_camera_palette(&vm, shield_instance, 0);
+            if (!source && kept.particle_weapons[slot].instance)
+                source = &kept.particle_weapons[slot].source;
+        }
+        /* The shield toggle also enables effects on the actor's separately
+         * attached rifle. Those particles arrive with the normal world view. */
+        const int held_shield = !in_camera && shield_active && held.model[slot] &&
+            guest_word(&vm, held.model[slot]) == owner;
+        if (!source && !held_shield)
+            continue;
         const void *projection = vm.resolve(vm.host, 0x0055FA40u, sizeof weapon.particle_projection, 0);
         if (!projection)
             return TSFP_MODEL_DEFAULT;
-        if (matched_held) {
+        if (held_shield) {
             weapon.particle_move = held.correction[hand];
         } else {
             XrMatrix4x4f target, original;
-            memcpy(&original, matched_source, sizeof original);
+            memcpy(&original, source, sizeof original);
             if (!weapon_target(id, hand, &target) ||
                 !tsfp_weapon_correction(&original, &target, &weapon.particle_move))
                 return TSFP_MODEL_DEFAULT;

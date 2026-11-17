@@ -67,7 +67,8 @@ static struct {
     XrSpace touch_space[TOUCH_POSES][HANDS];
     XrPosef touch_pose[TOUCH_POSES][HANDS];
     unsigned touch_valid;
-    int snap_armed, last_snap_degrees;
+    TsfpRightStickState right_stick;
+    int last_snap_degrees;
     XrActionSet controls;
     XrAction actions[ACTIONS];
     PFN_xrGetVulkanGraphicsDevice2KHR get_physical;
@@ -693,7 +694,7 @@ static void locate_touch_poses(void)
 
 static void reset_vr_controls(void)
 {
-    xr.snap_armed = 0;
+    xr.right_stick = (TsfpRightStickState){0};
     atomic_store_explicit(&pending_snap, 0, memory_order_relaxed);
 }
 
@@ -701,12 +702,14 @@ static void vr_right_stick(RecompPadState *state, XrVector2f stick, int mounted)
 {
     const int degrees = atomic_load(&snap_degrees);
     if (degrees != xr.last_snap_degrees) {
-        xr.snap_armed = 0;
+        xr.right_stick.snap_armed = 0;
         xr.last_snap_degrees = degrees;
     }
-    const TsfpRightStickInput input = tsfp_right_stick(stick, mounted, degrees, &xr.snap_armed);
+    const TsfpRightStickInput input = tsfp_right_stick(stick, mounted, degrees, &xr.right_stick);
     state->rx = axis(input.look.x);
     state->ry = axis(input.look.y);
+    if (input.weapon)
+        state->buttons |= input.weapon > 0 ? RECOMP_PAD_DPAD_RIGHT : RECOMP_PAD_DPAD_LEFT;
     if (mounted || input.snap_degrees)
         atomic_store(&pending_snap, input.snap_degrees);
 }
@@ -755,9 +758,9 @@ static void sync_controls(int immersive)
     if (button(X, LEFT)) {
         if (!immersive) state.buttons |= RECOMP_PAD_X;
         else if (mounted) state.buttons |= RECOMP_PAD_B;
-        else state.buttons |= RECOMP_PAD_DPAD_UP; /* Current weapon function. */
+        else state.buttons |= RECOMP_PAD_DPAD_DOWN; /* Grenade type. */
     }
-    if (button(Y, LEFT)) state.buttons |= immersive && !mounted ? RECOMP_PAD_DPAD_RIGHT : RECOMP_PAD_Y;
+    if (button(Y, LEFT)) state.buttons |= immersive && !mounted ? RECOMP_PAD_DPAD_UP : RECOMP_PAD_Y;
     if (button(MENU, LEFT)) state.buttons |= RECOMP_PAD_START;
     if (button(CLICK, LEFT)) state.buttons |= RECOMP_PAD_LEFT_THUMB;
     if (button(CLICK, RIGHT)) state.buttons |= RECOMP_PAD_RIGHT_THUMB;
@@ -1129,6 +1132,13 @@ int tsfp_xr_tracked_matrices(const float projection[16], TsfpModelRole role, flo
         return 0;
     XrMatrix4x4f game;
     memcpy(game.m, projection, sizeof game.m);
+    if (role == TSFP_MODEL_MUZZLE_PARTICLES) {
+        float offset, scale;
+        if (!tsfp_stereo_weapon_depth_range(&offset, &scale))
+            return 0;
+        tsfp_xbox_pack_depth(&game, offset, scale);
+        return eye_rows(rows, &game, &xr.anchor, 1.0f, xr.world_near, xr.world_far);
+    }
     if (role == TSFP_MODEL_LEFT_SHIELD || role == TSFP_MODEL_RIGHT_SHIELD ||
         role == TSFP_MODEL_LEFT_WEAPON_PARTICLES || role == TSFP_MODEL_RIGHT_WEAPON_PARTICLES ||
         role == TSFP_MODEL_UPLINK_MAP) {

@@ -35,18 +35,43 @@ static inline int tsfp_stick_step(float axis, int *armed)
 }
 
 typedef struct {
+    int snap_armed, weapon_armed, weapon_step, weapon_frames;
+} TsfpRightStickState;
+
+typedef struct {
     XrVector2f look;
-    int snap_degrees;
+    int snap_degrees, weapon;
 } TsfpRightStickInput;
 
 static inline TsfpRightStickInput tsfp_right_stick(XrVector2f stick, int mounted, int snap_degrees,
-                                                  int *snap_armed)
+                                                  TsfpRightStickState *state)
 {
-    if (mounted || !snap_degrees) {
-        *snap_armed = 0;
-        return (TsfpRightStickInput){ .look = { stick.x, mounted ? stick.y : 0 } };
+    if (mounted) {
+        *state = (TsfpRightStickState){0};
+        return (TsfpRightStickInput){ .look = stick };
     }
-    return (TsfpRightStickInput){ .snap_degrees = snap_degrees * tsfp_stick_step(stick.x, snap_armed) };
+
+    TsfpRightStickInput input = {0};
+    const float horizontal = fabsf(stick.x), vertical = fabsf(stick.y);
+    if (vertical < 0.35f || vertical > horizontal) {
+        const int step = tsfp_stick_step(stick.y, &state->weapon_armed);
+        if (step) {
+            state->weapon_step = step;
+            state->weapon_frames = 2; /* Keep a short flick visible to the guest input poll. */
+        }
+    }
+    if (state->weapon_frames) {
+        input.weapon = state->weapon_step;
+        --state->weapon_frames;
+    }
+
+    if (snap_degrees) {
+        if (horizontal < 0.35f || horizontal >= vertical)
+            input.snap_degrees = snap_degrees * tsfp_stick_step(stick.x, &state->snap_armed);
+    } else if (horizontal >= vertical || vertical < 0.65f) {
+        input.look.x = stick.x;
+    }
+    return input;
 }
 
 /* Rotate the source mesh around its wrist and keep the wrist exactly at

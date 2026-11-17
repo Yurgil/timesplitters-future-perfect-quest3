@@ -163,6 +163,8 @@ static void check_pose(unsigned id, const TsfpWeaponProfile *profile, unsigned h
     XrVector3f_Normalize(&model_forward);
     near(model_forward, forward);
     assert(XrVector3f_Dot(&model_top, &top) > .1f);
+    if (id == TSFP_WEAPON_FLAMETHROWER)
+        near(difference(transformed(&target, (XrVector3f){0,-1,0}), origin), top);
 
     /* The guest can draw the same housing at a different angle, scale and
      * offset. Undo the original palette before applying the controller pose. */
@@ -279,6 +281,50 @@ static void check_weapon_effects(const uint8_t *pak, size_t bytes)
     check_effect_pose(62, machinegun_alt->muzzle);
 }
 
+static void check_spawned_muzzle_particles(void)
+{
+    const XrPosef anchor = {{0,.6f,0,.8f}, {1.3f,.2f,-.7f}};
+    const XrVector3f room = {.14f,-.07f,.22f};
+    XrVector3f local_room;
+    const XrQuaternionf inverse = {0,-.6f,0,.8f};
+    XrQuaternionf_RotateVector3f(&local_room, &inverse, &room);
+    XrPosef body = anchor;
+    XrVector3f_Add(&body.position, &body.position, &room);
+
+    XrMatrix4x4f lens, world_from_camera, camera_from_world;
+    XrMatrix4x4f_CreateProjection(&lens, GRAPHICS_D3D, -1, 1, 1, -1, .05f, 100.f);
+    tsfp_xbox_pack_depth(&lens, .75f, .25f);
+    XrMatrix4x4f_CreateFromRigidTransform(&world_from_camera, &anchor);
+    XrMatrix4x4f_InvertRigidBody(&camera_from_world, &world_from_camera);
+    const TsfpWeaponProfile *rifle = tsfp_weapon_profile(12);
+    const float yaw[] = {-.60f, 0, .60f};
+    for (unsigned i = 0; i < sizeof yaw / sizeof yaw[0]; ++i) {
+        const XrQuaternionf aim = {0, sinf(yaw[i]), 0, cosf(yaw[i])};
+        XrMatrix4x4f target;
+        assert(tsfp_weapon_target(12, TSFP_AVATAR_RIGHT, (XrVector3f){.25f,-.38f,-.45f}, aim, &target));
+        const XrVector3f model_muzzle = transformed(&target, rifle->muzzle);
+        XrVector3f shot_origin, shot_direction, world_origin, world_direction;
+        tsfp_weapon_bore(rifle, &target, &shot_origin, &shot_direction);
+        XrVector3f_Add(&shot_origin, &shot_origin, &local_room);
+        tsfp_weapon_world_bore(&world_from_camera, shot_origin, shot_direction,
+                               &world_origin, &world_direction);
+        const XrVector3f emitter = transformed(&camera_from_world, world_origin);
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            const XrView view = {
+                .pose = {anchor.orientation, {body.position.x + (eye ? .032f : -.032f),
+                                             body.position.y, body.position.z}},
+                .fov = {-.9f,.8f,.8f,-.8f},
+            };
+            XrMatrix4x4f particle_rows;
+            assert(tsfp_xbox_eye_transform_depth(&particle_rows, &lens, &anchor, &view, 1.f, .05f, 100.f));
+            XrMatrix4x4f particle_clip;
+            XrMatrix4x4f_Multiply(&particle_clip, &particle_rows, &lens);
+            const XrMatrix4x4f model_clip = tsfp_eye_clip_for_api(&body, &view, .05f, 100.f, GRAPHICS_D3D);
+            near(transformed(&particle_clip, emitter), transformed(&model_clip, model_muzzle));
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -296,6 +342,7 @@ int main(int argc, char **argv)
 
     check_uplink();
     check_weapon_effects(pak, bytes);
+    check_spawned_muzzle_particles();
 
     assert(tsfp_weapon_hand(TSFP_WEAPON_MAIN_SLOT, 1) == TSFP_AVATAR_RIGHT);
     assert(tsfp_weapon_hand(TSFP_WEAPON_OFF_SLOT, 0) == TSFP_AVATAR_RIGHT);

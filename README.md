@@ -41,11 +41,12 @@ Android accepts in-place updates signed by the same key. Back up your profile be
 | Head movement | Look and lean |
 | Left stick | Move relative to where you are looking |
 | Right stick left/right | Turn smoothly or snap by 30°, 45°, or 60° |
+| Right stick up/down | Next/previous weapon, one step per flick |
 | Tracked controllers | Aim held weapons |
 | Right / left trigger | Xbox RT / LT, including the game's firing actions |
-| Right **B** | Xbox **X** (reload / action) |
-| Left **X** | Change the current weapon's function |
-| Left **Y** | Cycle to the next weapon |
+| Right **B** | Reload (Xbox **X**) |
+| Left **X** | Change grenade type, or zoom out while using the game's zoom |
+| Left **Y** | Change the current weapon's function, or zoom in while using the game's zoom |
 | Right **A** | Xbox **A** |
 | Left / right Grip | Xbox left / right shoulder inputs |
 | Left **Menu** (☰) | Pause / Xbox Start |
@@ -53,7 +54,12 @@ Android accepts in-place updates signed by the same key. Back up your profile be
 
 The right stick aims mounted guns. While mounted, left **X** and **Y** send Xbox **B** and **Y**. In menus and on the virtual screen, the face buttons and sticks keep their original Xbox mappings. Hold both Grips and move the left stick to use the D-pad there.
 
-Open **VR Options** from Settings or the pause menu. **Turn Type** defaults to **Smooth**. Select **Snap** to show **Snap Angle**. Settings are saved for the next launch.
+Open **Settings → VR Options** from the main menu or **Options → VR Options** while paused. **Turn Type** defaults to **Smooth**. Select **Snap** to show **Snap Angle**. Changes apply immediately and are saved between launches.
+
+| VR option | Values |
+| --- | --- |
+| **Turn Type** | **Smooth** or **Snap** |
+| **Snap Angle** | **30 degrees**, **45 degrees**, or **60 degrees**, shown when **Snap** is selected |
 
 For a one-launch snap-turn override, stop the app and restart it with ADB.
 

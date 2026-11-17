@@ -35,23 +35,37 @@ int main(void)
     assert(tsfp_stick_step(-0.8f, &armed) == -1);
 
     for (int degrees = 30; degrees <= 60; degrees += 15) {
-        int snap_armed = 0;
-        TsfpRightStickInput on_foot = tsfp_right_stick((XrVector2f){.9f,0}, 0, degrees, &snap_armed);
+        TsfpRightStickState stick = {0};
+        TsfpRightStickInput on_foot = tsfp_right_stick((XrVector2f){.9f,0}, 0, degrees, &stick);
         assert(on_foot.snap_degrees == 0);
-        on_foot = tsfp_right_stick((XrVector2f){0,.9f}, 0, degrees, &snap_armed);
-        assert(on_foot.snap_degrees == 0 && on_foot.look.y == 0);
-        on_foot = tsfp_right_stick((XrVector2f){.9f,0}, 0, degrees, &snap_armed);
-        assert(on_foot.snap_degrees == degrees && on_foot.look.x == 0);
-        on_foot = tsfp_right_stick((XrVector2f){.9f,0}, 0, degrees, &snap_armed);
+        on_foot = tsfp_right_stick((XrVector2f){0,.9f}, 0, degrees, &stick);
+        assert(on_foot.snap_degrees == 0 && on_foot.look.y == 0 && on_foot.weapon == 1);
+        on_foot = tsfp_right_stick((XrVector2f){.9f,0}, 0, degrees, &stick);
+        assert(on_foot.snap_degrees == degrees && on_foot.look.x == 0 && on_foot.weapon == 1);
+        on_foot = tsfp_right_stick((XrVector2f){.9f,0}, 0, degrees, &stick);
         assert(on_foot.snap_degrees == 0);
-        tsfp_right_stick((XrVector2f){0}, 0, degrees, &snap_armed);
-        on_foot = tsfp_right_stick((XrVector2f){-.9f,0}, 0, degrees, &snap_armed);
+        tsfp_right_stick((XrVector2f){0}, 0, degrees, &stick);
+        on_foot = tsfp_right_stick((XrVector2f){-.9f,0}, 0, degrees, &stick);
         assert(on_foot.snap_degrees == -degrees);
 
-        TsfpRightStickInput mounted = tsfp_right_stick((XrVector2f){.9f,.65f}, 1, degrees, &snap_armed);
-        assert(mounted.snap_degrees == 0 && mounted.look.x == .9f && mounted.look.y == .65f);
-        on_foot = tsfp_right_stick((XrVector2f){.9f,.65f}, 0, 0, &snap_armed);
+        TsfpRightStickInput mounted = tsfp_right_stick((XrVector2f){.9f,.65f}, 1, degrees, &stick);
+        assert(mounted.snap_degrees == 0 && mounted.weapon == 0 && mounted.look.x == .9f && mounted.look.y == .65f);
+        on_foot = tsfp_right_stick((XrVector2f){.9f,.65f}, 0, 0, &stick);
         assert(on_foot.snap_degrees == 0 && on_foot.look.x == .9f && on_foot.look.y == 0);
+    }
+
+    for (int degrees = 0; degrees <= 30; degrees += 30) {
+        TsfpRightStickState stick = {0};
+        tsfp_right_stick((XrVector2f){0}, 0, degrees, &stick);
+        TsfpRightStickInput input = tsfp_right_stick((XrVector2f){.75f,.9f}, 0, degrees, &stick);
+        assert(input.weapon == 1 && input.snap_degrees == 0 && input.look.x == 0);
+        assert(tsfp_right_stick((XrVector2f){0,.9f}, 0, degrees, &stick).weapon == 1);
+        assert(tsfp_right_stick((XrVector2f){0,.9f}, 0, degrees, &stick).weapon == 0);
+        assert(tsfp_right_stick((XrVector2f){0,-.9f}, 0, degrees, &stick).weapon == 0);
+        tsfp_right_stick((XrVector2f){0}, 0, degrees, &stick);
+        assert(tsfp_right_stick((XrVector2f){0,-.9f}, 0, degrees, &stick).weapon == -1);
+        assert(tsfp_right_stick((XrVector2f){0,-.9f}, 1, degrees, &stick).weapon == 0);
+        assert(tsfp_right_stick((XrVector2f){0,-.9f}, 0, degrees, &stick).weapon == 0);
     }
 
     const XrVector3f grip = { 0.25f, -0.40f, -0.35f };
