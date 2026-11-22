@@ -1,5 +1,6 @@
 #include "stereo_math.h"
 #include "avatar_pose.h"
+#include "stereo_probe.h"
 #include <string.h>
 
 static XrVector3f ndc(const XrMatrix4x4f *matrix, float x, float y, float z)
@@ -12,6 +13,35 @@ static XrVector3f ndc(const XrMatrix4x4f *matrix, float x, float y, float z)
 
 int main(void)
 {
+    /* Mounting and both mounted cameras must bypass snap and weapon flicks. */
+    const uint32_t turret_modes[] = {0x20u, 0x40u, 0x80u, 0x10000u};
+    for (unsigned i = 0; i < sizeof turret_modes / sizeof turret_modes[0]; ++i) {
+        const uint32_t mode = turret_modes[i];
+        const int mounted = tsfp_turret_camera_mode(mode);
+        assert(mounted);
+        assert(tsfp_turret_uses_aim_bindings(mode) == (mode == 0x40u || mode == 0x80u));
+        TsfpRightStickState stick = { .snap_armed = 1, .weapon_armed = 1 };
+        const TsfpRightStickInput aim = tsfp_right_stick((XrVector2f){.8f, -.9f}, mounted, 45, &stick);
+        assert(aim.look.x == .8f && aim.look.y == -.9f && aim.snap_degrees == 0 && aim.weapon == 0);
+    }
+    assert(!tsfp_turret_camera_mode(2u) && !tsfp_turret_camera_mode(0x400u));
+
+    /* A fresh installation must use the calibrated hold even when the
+       character animation has rolled the wrist upside down. */
+    for (unsigned hand = 0; hand < TSFP_AVATAR_HANDS; ++hand) {
+        const XrMatrix4x4f hold = tsfp_avatar_default_hand_hold(hand);
+        assert(XrMatrix4x4f_IsRigidBody(&hold, 0.001f));
+        for (unsigned pose = 0; pose < 3; ++pose) {
+            XrMatrix4x4f aim, animated, expected, correction, actual;
+            XrMatrix4x4f_CreateRotation(&aim, 0.2f * pose, -0.3f * pose, 0.15f * pose);
+            XrMatrix4x4f_CreateRotation(&animated, 0, 0, pose == 1 ? 3.14159265f : 0.4f);
+            XrMatrix4x4f_Multiply(&expected, &aim, &hold);
+            correction = tsfp_avatar_hand_rotation(&hold, &aim, &animated);
+            XrMatrix4x4f_Multiply(&actual, &correction, &animated);
+            for (unsigned i = 0; i < 16; ++i)
+                assert(fabsf(actual.m[i] - expected.m[i]) < 1e-4f);
+        }
+    }
     const XrPosef anchor = {
         .orientation = { .y = 0.70710678f, .w = 0.70710678f },
         .position = { 10.0f, 1.5f, 2.0f }
@@ -50,6 +80,8 @@ int main(void)
 
         TsfpRightStickInput mounted = tsfp_right_stick((XrVector2f){.9f,.65f}, 1, degrees, &stick);
         assert(mounted.snap_degrees == 0 && mounted.weapon == 0 && mounted.look.x == .9f && mounted.look.y == .65f);
+        mounted = tsfp_right_stick((XrVector2f){0,-.9f}, 1, degrees, &stick);
+        assert(mounted.snap_degrees == 0 && mounted.weapon == 0 && mounted.look.x == 0 && mounted.look.y == -.9f);
         on_foot = tsfp_right_stick((XrVector2f){.9f,.65f}, 0, 0, &stick);
         assert(on_foot.snap_degrees == 0 && on_foot.look.x == .9f && on_foot.look.y == 0);
     }
@@ -185,17 +217,6 @@ int main(void)
 
     XrMatrix4x4f bones[TSFP_ARM_MATRICES], identity;
     XrMatrix4x4f_CreateIdentity(&identity);
-    XrMatrix4x4f body_basis, scaled_bone, draw_bone, recovered_basis;
-    XrMatrix4x4f_CreateRotation(&body_basis, 5, 70, 0);
-    tsfp_matrix_set_position(&body_basis, (XrVector3f){0.12f, -1.4f, -0.16f});
-    XrMatrix4x4f_CreateScale(&scaled_bone, 0.9f, 1.1f, 1.05f);
-    tsfp_matrix_set_position(&scaled_bone, (XrVector3f){0.25f, 1.2f, 0.2f});
-    XrMatrix4x4f_Multiply(&draw_bone, &body_basis, &scaled_bone);
-    assert(tsfp_avatar_palette_basis(&recovered_basis, &scaled_bone, &draw_bone));
-    for (unsigned i = 0; i < 16; ++i)
-        assert(fabsf(recovered_basis.m[i] - body_basis.m[i]) < 1e-5f);
-    scaled_bone.m[0] = 0;
-    assert(!tsfp_avatar_palette_basis(&recovered_basis, &scaled_bone, &draw_bone));
     for (unsigned i = 0; i < TSFP_ARM_MATRICES; ++i)
         XrMatrix4x4f_CreateTranslation(&bones[i], 0, 0, 0.3f * ((i + 1) / 2));
     const XrVector3f target = { -0.25f, -0.05f, 0.30f };
@@ -208,9 +229,43 @@ int main(void)
     assert(XrVector3f_Length(&error) < 1e-5f);
     assert(fabsf(XrVector3f_Length(&new_elbow) - 0.3f) < 1e-5f);
     assert(fabsf(XrVector3f_Length(&lower) - 0.3f) < 1e-5f);
-    assert(tsfp_avatar_pose_arm(bones, -1.0f, (XrVector3f){0, 0, -1}, &identity));
-    const XrVector3f clamped = tsfp_matrix_position(&bones[TSFP_ARM_HAND]);
-    assert(fabsf(clamped.z + 0.597f) < 1e-5f);
+    /* Beyond the animated reach, the hand and both rendered segments
+     * still meet at the joints. The shoulder remains attached. */
+    for (unsigned i = 0; i < TSFP_ARM_MATRICES; ++i)
+        XrMatrix4x4f_CreateTranslation(&bones[i], 0, 0, 0.3f * ((i + 1) / 2));
+    const XrVector3f extended = {0.18f, -0.2f, -0.86f};
+    assert(tsfp_avatar_pose_arm(bones, -1.0f, extended, &identity));
+    const XrVector3f arm_tip = {0, 0, 0.30f};
+    const XrVector3f elbow_joint = tsfp_matrix_position(&bones[TSFP_ARM_ELBOW_JOINT]);
+    const XrVector3f hand_joint = tsfp_matrix_position(&bones[TSFP_ARM_HAND]);
+    XrVector3f endpoint;
+    XrMatrix4x4f_TransformVector3f(&endpoint, &bones[TSFP_ARM_UPPER], &arm_tip);
+    XrVector3f_Sub(&error, &endpoint, &elbow_joint);
+    assert(XrVector3f_Length(&error) < 1e-5f);
+    XrMatrix4x4f_TransformVector3f(&endpoint, &bones[TSFP_ARM_FOREARM], &arm_tip);
+    XrVector3f_Sub(&error, &endpoint, &hand_joint);
+    assert(XrVector3f_Length(&error) < 1e-5f);
+    XrVector3f_Sub(&error, &hand_joint, &extended);
+    assert(XrVector3f_Length(&error) < 1e-5f);
+    const XrVector3f shoulder_joint = tsfp_matrix_position(&bones[TSFP_ARM_UPPER]);
+    assert(XrVector3f_Length(&shoulder_joint) < 1e-5f);
+    assert(!tsfp_avatar_pose_arm(bones, -1.0f, (XrVector3f){0, NAN, 0}, &identity));
+
+    /* Fix the hand to a local-space grip with yaw and body setback. */
+    for (unsigned i = 0; i < TSFP_ARM_MATRICES; ++i)
+        XrMatrix4x4f_CreateTranslation(&bones[i], 0.24f, -0.22f, 0.10f - 0.285f * ((i + 1) / 2));
+    XrPosef body = anchor, camera_from_local;
+    body.position.x += 0.18f;
+    body.position.z += 0.14f;
+    XrPosef_Invert(&camera_from_local, &body);
+    const XrVector3f local_grip = {9.65f, 1.13f, 1.85f};
+    XrVector3f target_in_camera, wrist_in_local;
+    XrPosef_TransformVector3f(&target_in_camera, &camera_from_local, &local_grip);
+    assert(tsfp_avatar_pose_arm(bones, 1.0f, target_in_camera, &identity));
+    const XrVector3f wrist_in_camera = tsfp_matrix_position(&bones[TSFP_ARM_WRIST_JOINT]);
+    XrPosef_TransformVector3f(&wrist_in_local, &body, &wrist_in_camera);
+    XrVector3f_Sub(&error, &wrist_in_local, &local_grip);
+    assert(XrVector3f_Length(&error) < 1e-5f);
 
     /* A short arcade limb still follows a reachable controller target. */
     const float short_joints[] = { 0.0f, 0.033f, 0.033f, 0.051f, 0.051f };
@@ -250,11 +305,13 @@ int main(void)
     /* At a 90-degree head turn, the stereo frustum must still include
        both eyes' near and distant corners. */
     const XrPosef origin = { .orientation = { .w = 1.0f } };
-    XrView cull_eyes[2] = { left, right };
+    XrView cull_eyes[3] = { left, right,
+        { .pose = {anchor.orientation, {-.45f, .05f, -.8f}}, .fov = {-.08f,.08f,.08f,-.08f} } };
     cull_eyes[1].pose.position.z -= 0.032f;
     XrMatrix4x4f visibility;
-    assert(tsfp_stereo_visibility_clip(&visibility, &origin, &anchor, cull_eyes, 0.06f, 100.0f));
-    for (unsigned eye = 0; eye < 2; ++eye) {
+    assert(tsfp_stereo_visibility_clip(&visibility, &origin, &anchor, cull_eyes, 2, 0.06f, 100.0f));
+    assert(tsfp_stereo_visibility_clip(&visibility, &origin, &anchor, cull_eyes, 3, 0.06f, 100.0f));
+    for (unsigned eye = 0; eye < 3; ++eye) {
         const XrFovf aperture = cull_eyes[eye].fov;
         const float sides[] = { aperture.angleLeft, aperture.angleRight };
         const float heights[] = { aperture.angleDown, aperture.angleUp };
@@ -322,6 +379,49 @@ int main(void)
     assert(ndc(&l_world, 0.0f, 0.0f, -100.0f).x > 0.0f);
     assert(fabsf(ndc(&l_world, 0.0f, 0.0f, -10.0f).z) < 1e-5f);
     assert(fabsf(ndc(&l_world, 0.0f, 0.0f, -1000.0f).z - 1.0f) < 1e-5f);
+
+    /* CPU-projected ghost bounds and GPU-projected world geometry must agree
+     * in both eyes, including the depth used while rendering to scratch. */
+    XrMatrix4x4f game_view;
+    const XrPosef game_camera = {{0,.6f,0,.8f}, {.5f,.13f,-.7f}};
+    XrMatrix4x4f_CreateFromRigidTransform(&game_view, &game_camera);
+    const XrView ghost_eyes[] = {left, right};
+    XrVector3f centers[2];
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        XrMatrix4x4f view, projection, clip, game_clip, eye_clip;
+        tsfp_xbox_eye_camera(&game_view, &anchor, &ghost_eyes[eye], .06f, 1000.f, &view, &projection, &clip);
+        XrMatrix4x4f_Multiply(&game_clip, &us_xbox, &game_view);
+        assert(tsfp_xbox_eye_transform_depth(&transform, &us_xbox, &anchor, &ghost_eyes[eye],
+                                            1.0f, .06f, 1000.f));
+        XrMatrix4x4f_Multiply(&eye_clip, &transform, &game_clip);
+        for (unsigned i = 0; i < 16; ++i)
+            assert(fabsf(clip.m[i] - eye_clip.m[i]) < 1e-5f);
+        centers[eye] = ndc(&clip, 3.0f, 0.1f, -1.0f);
+    }
+    assert(fabsf(centers[0].x - centers[1].x) > .005f);
+
+    /* A turned head and different eye apertures must still put the reticle
+     * at the same point on the world camera's center ray. */
+    XrMatrix4x4f turret_lens = us_xbox;
+    turret_lens.m[8] = 0.04f;
+    turret_lens.m[9] = -0.02f;
+    XrView turret_eyes[2] = {left, right};
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        XrView *view = &turret_eyes[eye];
+        XrQuaternionf_CreateFromAxisAngle(&view->pose.orientation, &(XrVector3f){0, 1, 0}, 1.8f);
+        view->pose.position.y += 0.1f;
+        view->fov.angleLeft += eye == 0 ? -0.05f : 0.03f;
+        view->fov.angleUp += eye == 0 ? 0.03f : -0.02f;
+        const XrMatrix4x4f reticle = tsfp_turret_reticle_transform(&turret_lens, &anchor, view);
+        XrMatrix4x4f eye_from_clip, eye_from_turret;
+        assert(tsfp_xbox_eye_transform(&eye_from_clip, &turret_lens, &anchor, view, 1.0f));
+        XrMatrix4x4f_Multiply(&eye_from_turret, &eye_from_clip, &turret_lens);
+        const XrVector3f target = ndc(&eye_from_turret, 10.0f * turret_lens.m[8] / turret_lens.m[0],
+                                     10.0f * turret_lens.m[9] / turret_lens.m[5], -10.0f);
+        const XrVector3f sprite = ndc(&reticle, 0, 0, 0);
+        assert(fabsf(sprite.x - target.x) < 1e-5f && fabsf(sprite.y - target.y) < 1e-5f);
+        assert(fabsf(ndc(&reticle, 0, 0, 1).z - sprite.z) < 1e-5f);
+    }
 
     XrMatrix4x4f viewmodel = us_xbox;
     viewmodel.m[10] = -1.01f;

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 void tsfp_xr_enable(const char *capture_prefix, const char *probe, const char *cache,
+                    const char *hand_calibration,
                     unsigned msaa, unsigned anisotropy);
 int tsfp_xr_enabled(void);
 void tsfp_xr_set_snap_degrees(int degrees);
@@ -14,6 +15,9 @@ unsigned tsfp_xr_anisotropy(void);
 int tsfp_xr_touch_tracked(unsigned hand);
 int tsfp_xr_uplink_trigger(unsigned hand);
 int tsfp_xr_uplink_clip(float rows[32]);
+struct TsfpScopeGeometry;
+int tsfp_xr_scope_matrices(float rows[16]);
+int tsfp_xr_scope_lens(struct TsfpScopeGeometry *geometry, float rows[32]);
 VkExtent2D tsfp_xr_geometry_extent(void);
 struct RhiImage;
 void tsfp_xr_capture_frame(struct RhiImage *world);
@@ -31,6 +35,7 @@ void tsfp_xr_prepare_scene_frame(void);
 VkImage tsfp_xr_begin_frame(int geometry_ready);
 void tsfp_xr_draw_projection(VkCommandBuffer commands);
 int tsfp_xr_world_matrices(float rows[32]);
+void tsfp_xr_ghost_camera(const float game_view[16], float eyes[2][3][16]);
 int tsfp_xr_visibility_matrix(const float game_view[16], const float game_lens[16], float result[16], int objects);
 int tsfp_xr_object_outside(const float minimum[3], const float maximum[3]);
 int tsfp_xr_world_active(void);

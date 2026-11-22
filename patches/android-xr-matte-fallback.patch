@@ -1,0 +1,86 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -1164,9 +1164,14 @@
+ #endif
+ 
+ #ifdef TSFP_OPENXR
++static int xr_scene_target(void)
++{
++    return V.rt_color && V.rt_color->image == V.xr_world_color;
++}
++
+ static int xr_world_target(void)
+ {
+-    return V.rt_color && V.rt_color->image == V.xr_world_color && V.rt_color->xr_array &&
++    return xr_scene_target() && V.rt_color->xr_array &&
+            (!V.rt_depth || V.rt_depth->xr_array);
+ }
+ 
+@@ -1182,9 +1187,11 @@
+ 
+ static int xr_fullscreen_draw(void)
+ {
++    const TsfpScreenOverlay overlay = tsfp_stereo_screen_overlay_draw();
+     return (V.xr_effect_view_mask && V.xr_world_active && xr_world_target()) ||
+            (V.view_mask && (V.xr_uplink_eye_mask || tsfp_stereo_screen_effect_draw() ||
+-                            (xr_world_target() && tsfp_stereo_screen_overlay_draw())));
++                            (overlay != TSFP_SCREEN_OVERLAY_NONE && xr_world_target()))) ||
++           (overlay == TSFP_SCREEN_OVERLAY_SCENE && xr_scene_target());
+ }
+ 
+ static int xr_late_screen_effect(void)
+@@ -3070,7 +3077,10 @@
+ #ifdef TSFP_OPENXR
+ int tsfp_vk_cinematic_matte(uint32_t caller, int top, float edge)
+ {
+-    if (!V.xr_world_active || !xr_world_target() || !begin_rendering() || (V.view_mask & 3u) != 3u)
++    /* The scene color also supplies the game quad when stereo is unavailable.
++     * A zero view mask is valid for this primary mono render pass. */
++    if (!xr_scene_target() || V.xr_effect_view_mask || V.xr_uplink_eye_mask || V.xr_ghost_eye ||
++        !begin_rendering() || (V.view_mask && (V.view_mask & 3u) != 3u))
+         return 0;
+     const uint32_t y = (uint32_t)(fminf(1.0f, fmaxf(0.0f, edge)) * V.area.height + 0.5f);
+     const uint32_t height = top ? y : V.area.height - y;
+@@ -3086,17 +3096,18 @@
+         };
+         vkCmdClearAttachments(cmd(), 1, &black, 1, &band);
+ #ifndef TSFP_RELEASE
+-        static uint32_t reported[6];
++        static struct { uint32_t caller, eyes; uint64_t frame; } reported[6];
+         for (unsigned i = 0; i < sizeof reported / sizeof reported[0]; ++i) {
+-            if (reported[i] == caller)
+-                break;
+-            if (!reported[i]) {
+-                reported[i] = caller;
+-                fprintf(stderr, "[XR-MATTE] guest=%08x y=%d rect=%ux%u target=%ux%u eyes=%u\n",
+-                        caller, band.rect.offset.y, V.area.width, height,
+-                        V.area.width, V.area.height, V.view_mask);
+-                break;
+-            }
++            if (reported[i].caller && reported[i].caller != caller)
++                continue;
++            if (!reported[i].caller || reported[i].eyes != V.view_mask || V.frame_no - reported[i].frame > 1)
++                fprintf(stderr, "[XR-MATTE] frame=%llu guest=%08x y=%d rect=%ux%u target=%ux%u eyes=%u\n",
++                        (unsigned long long)V.frame_no, caller, band.rect.offset.y,
++                        V.area.width, height, V.area.width, V.area.height, V.view_mask);
++            reported[i].caller = caller;
++            reported[i].eyes = V.view_mask;
++            reported[i].frame = V.frame_no;
++            break;
+         }
+ #else
+         (void)caller;
+--- a/titles/futureperfect/src/recomp_manual.c
++++ b/titles/futureperfect/src/recomp_manual.c
+@@ -2056,7 +2056,10 @@
+ extern void sub_00137010_gen(void);
+ void sub_00137010(void)
+ {
+-#if defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
++#if defined(TSFP_QUEST_STEREO_PROBE)
++    extern void tsfp_quest_remote_view_overlay(void (*draw)(void));
++    tsfp_quest_remote_view_overlay(sub_00137010_gen);
++#elif defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
+     pc_display_aim_panel(sub_00137010_gen,0x00137010u);
+ #else
+     sub_00137010_gen();

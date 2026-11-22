@@ -1,0 +1,84 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -313,6 +313,8 @@
+     unsigned                 xr_held_uploaded;
+     RhiBuffer               *xr_hud_constants;
+     int                      xr_hud_uploaded;
++    RhiBuffer               *xr_turret_reticle_constants;
++    int                      xr_turret_reticle_uploaded;
+ #endif
+ 
+     /* dummies for what a draw leaves unbound */
+@@ -1074,6 +1076,7 @@
+             for (unsigned hand = 0; hand < TSFP_AVATAR_HANDS; ++hand)
+                 V.xr_held_constants[hand] = v_buffer_create(&desc, identity);
+             V.xr_hud_constants = v_buffer_create(&desc, identity);
++            V.xr_turret_reticle_constants = v_buffer_create(&desc, identity);
+             for (unsigned role = TSFP_MODEL_LEFT_WEAPON; role < TSFP_MODEL_TRACKED_COUNT; ++role)
+                 V.xr_tracked_constants[role] = v_buffer_create(&desc, identity);
+         }
+@@ -2071,6 +2074,7 @@
+             if (V.xr_held_constants[hand])
+                 v_buffer_destroy(V.xr_held_constants[hand]);
+         if (V.xr_hud_constants) v_buffer_destroy(V.xr_hud_constants);
++        if (V.xr_turret_reticle_constants) v_buffer_destroy(V.xr_turret_reticle_constants);
+         for (unsigned role = TSFP_MODEL_LEFT_WEAPON; role < TSFP_MODEL_TRACKED_COUNT; ++role)
+             if (V.xr_tracked_constants[role])
+                 v_buffer_destroy(V.xr_tracked_constants[role]);
+@@ -2161,6 +2165,7 @@
+     V.xr_tracked_uploaded = 0;
+     V.xr_held_uploaded = 0;
+     V.xr_hud_uploaded = 0;
++    V.xr_turret_reticle_uploaded = 0;
+     xr_report_draw_counts();
+ #endif
+     V.frame_no++;
+@@ -4234,6 +4239,12 @@
+         tsfp_stereo_model_role() == TSFP_MODEL_DEFAULT && tsfp_stereo_hud_draw();
+ }
+ 
++static int xr_turret_reticle_draw(void)
++{
++    return V.view_mask && V.xr_world_active && V.xr_turret_reticle_constants &&
++        tsfp_stereo_turret_reticle_draw();
++}
++
+ static RhiBuffer *xr_draw_eye_constants_kind(void);
+ 
+ static RhiBuffer *xr_draw_eye_constants(void)
+@@ -4293,6 +4304,16 @@
+             }
+         }
+         return V.xr_hud_constants;
++    }
++    if (xr_turret_reticle_draw()) {
++        if (!V.xr_turret_reticle_uploaded) {
++            float rows[32];
++            if (!tsfp_xr_turret_reticle_matrices(rows))
++                return V.xr_identity_constants;
++            v_buffer_update(V.xr_turret_reticle_constants, rows);
++            V.xr_turret_reticle_uploaded = 1;
++        }
++        return V.xr_turret_reticle_constants;
+     }
+     if (!V.xr_draw_world && !tracked_weapon)
+         return V.xr_identity_constants;
+@@ -4490,7 +4511,8 @@
+     const TsfpModelRole role = tsfp_stereo_model_role();
+     if (use_scissor && fullscreen && !V.xr_uplink_eye_mask)
+         use_scissor = 0;
+-    if (use_scissor && V.view_mask && (V.xr_draw_world || role != TSFP_MODEL_DEFAULT || xr_hud_draw())) {
++    if (use_scissor && V.view_mask &&
++        (V.xr_draw_world || role != TSFP_MODEL_DEFAULT || xr_hud_draw() || xr_turret_reticle_draw())) {
+         static int logged_scissor;
+         if (!logged_scissor && (V.scissor.left > 0 || V.scissor.top > 0 ||
+             V.scissor.right < (int32_t)V.area.width || V.scissor.bottom < (int32_t)V.area.height)) {
+@@ -4540,7 +4562,7 @@
+             stencil_test = VK_FALSE;
+         }
+         /* The panel floats in front of the world; nearer walls must not hide it. */
+-        if (xr_hud_draw())
++        if (xr_hud_draw() || xr_turret_reticle_draw())
+             depth_test = depth_write = VK_FALSE;
+ #endif
+         struct { VkStencilOp fail, pass, depth_fail; VkCompareOp cmp; } front, back;

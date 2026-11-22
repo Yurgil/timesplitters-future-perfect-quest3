@@ -1,0 +1,55 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -4263,7 +4263,7 @@
+ 
+ static RhiBuffer *xr_draw_eye_constants_kind(void)
+ {
+-    if (!V.view_mask || !V.xr_world_active)
++    if (!V.view_mask || !V.xr_world_active || tsfp_stereo_uplink_map_source())
+         return V.xr_identity_constants;
+     if (xr_fullscreen_draw())
+         return V.xr_identity_constants;
+@@ -4402,18 +4402,29 @@
+              * the stereo scene. Other guest draws retain the stereo view. */
+             if ((V.view_mask || V.xr_effect_view_mask || V.xr_uplink_eye_mask) &&
+                 v && v->image->xr_frame_copy) {
+-                if (!V.xr_effect_view_mask && !V.xr_uplink_eye_mask) {
++                if (tsfp_stereo_uplink_map_source()) {
++                    /* The game assembles the handheld map in guest screen
++                     * coordinates, using the primary copy for its scratch texture. */
++#ifndef TSFP_RELEASE
++                    static int reported_map;
++                    if (!reported_map) {
++                        reported_map = 1;
++                        fprintf(stderr, "[XR] Uplink map source samples a %ux%u frame copy\n",
++                                v->image->desc.width, v->image->desc.height);
++                    }
++#endif
++                } else if (!V.xr_effect_view_mask && !V.xr_uplink_eye_mask) {
+                     static int logged;
+                     if (!logged && !tsfp_stereo_screen_effect_draw()) {
+                         logged = 1;
+                         fprintf(stderr, "[XR-FX] Skipped an unscoped frame copy over the stereo scene\n");
+                     }
+                     return 0;
+-                }
+-                if (!v->image->xr_frame_paired)
+-                    return 0;
+-                if (V.xr_effect_view_mask == 2 || V.xr_uplink_eye_mask == 2)
++                } else if (!v->image->xr_frame_paired) {
++                    return 0;
++                } else if (V.xr_effect_view_mask == 2 || V.xr_uplink_eye_mask == 2) {
+                     v = v->image->xr_right_frame;
++                }
+             }
+ #endif
+             if (trace_on())
+@@ -4511,7 +4522,7 @@
+     const TsfpModelRole role = tsfp_stereo_model_role();
+     if (use_scissor && fullscreen && !V.xr_uplink_eye_mask)
+         use_scissor = 0;
+-    if (use_scissor && V.view_mask &&
++    if (use_scissor && V.view_mask && !tsfp_stereo_uplink_map_source() &&
+         (V.xr_draw_world || role != TSFP_MODEL_DEFAULT || xr_hud_draw() || xr_turret_reticle_draw())) {
+         static int logged_scissor;
+         if (!logged_scissor && (V.scissor.left > 0 || V.scissor.top > 0 ||

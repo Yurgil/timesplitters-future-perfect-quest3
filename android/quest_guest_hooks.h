@@ -9,12 +9,16 @@ void tsfp_quest_muzzle_flash_position(void);
 void tsfp_quest_shot_effect_position(void);
 void tsfp_quest_weapon_particles(void);
 void tsfp_quest_legacy_reticle(void);
+void tsfp_quest_alternate_reticle(void);
+void tsfp_quest_turret_look(void);
 void tsfp_quest_hud(void);
 void tsfp_quest_objective_notice(void);
 void tsfp_quest_screen_effects(void);
 void tsfp_quest_story_screen_effects(void);
 void tsfp_quest_world_screen_effects(void);
 void tsfp_quest_late_screen_effects(void);
+void tsfp_quest_ghost_actor(void);
+void tsfp_quest_ghost_reveal(void);
 void tsfp_quest_first_person_weapon_pass(void);
 void tsfp_quest_portal_visibility(void);
 void tsfp_quest_object_visibility(void);
@@ -22,6 +26,7 @@ void tsfp_quest_object_occlusion(void);
 void tsfp_quest_uplink_grab(void);
 void tsfp_quest_uplink_legacy_beams(void);
 void tsfp_quest_uplink_map(void);
+void tsfp_quest_uplink_map_source(void);
 int tsfp_quest_uplink_physics_begin(uint32_t callback);
 void tsfp_quest_uplink_physics_end(void);
 
@@ -45,6 +50,8 @@ static inline __attribute__((always_inline)) TsfpGuestCallee tsfp_quest_guest_ca
     case 0x001C0EC0u: return tsfp_quest_shot_effect_position;
     case 0x0011219Au: return tsfp_quest_weapon_particles;
     case 0x001CEEDEu: return tsfp_quest_legacy_reticle;
+    case 0x0014D324u: return tsfp_quest_alternate_reticle;
+    case 0x000D6275u: return tsfp_quest_turret_look;
     case 0x001CE9D1u: return tsfp_quest_hud;
     case 0x0014D655u: return tsfp_quest_objective_notice;
     case 0x001CED85u:
@@ -52,9 +59,12 @@ static inline __attribute__((always_inline)) TsfpGuestCallee tsfp_quest_guest_ca
     case 0x001CED8Au: return tsfp_quest_story_screen_effects;
     case 0x001CEED0u: return tsfp_quest_world_screen_effects;
     case 0x001CE9A9u: return tsfp_quest_late_screen_effects;
+    case 0x00126421u: return tsfp_quest_ghost_actor;
+    case 0x0012644Eu: return tsfp_quest_ghost_reveal;
     case 0x001CEEE8u: return tsfp_quest_first_person_weapon_pass;
     case 0x001C57B4u: return tsfp_quest_uplink_grab;
     case 0x001C5AD7u: return tsfp_quest_uplink_map;
+    case 0x001CE987u: return tsfp_quest_uplink_map_source;
     case 0x001CEECBu: return tsfp_quest_uplink_legacy_beams;
     }
     return RECOMP_DIRECT_CALLEE_AT(site, original);

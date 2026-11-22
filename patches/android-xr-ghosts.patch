@@ -1,0 +1,194 @@
+--- a/titles/futureperfect/src/recomp_manual.c
++++ b/titles/futureperfect/src/recomp_manual.c
+@@ -2159,6 +2159,14 @@
+ /* US 45410066: scope the spirit compatibility rules to the game's effect
+  * renderer and its model nodes / billboard batches, never shader hashes. */
+ #include "pc_ghost_render_guest.inc"
++
++#ifdef TSFP_QUEST_STEREO_PROBE
++int tsfp_quest_spirit_billboard(void)
++{
++    return spirit_billboard_active;
++}
++#endif
++
+ extern void sub_0024A1A0_gen(void);
+ void sub_0024A1A0(void) { pc_ghost_render(sub_0024A1A0_gen); }
+ extern void sub_0018EA90_gen(void);
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -287,7 +287,7 @@
+ #ifdef TSFP_OPENXR
+     RhiImage                *xr_world_color;
+     uint32_t                 xr_effect_view_mask;
+-    uint32_t                 xr_uplink_eye_mask;
++    uint32_t                 xr_uplink_eye_mask, xr_ghost_eye;
+     RhiBuffer               *xr_eye_constants, *xr_identity_constants;
+     RhiBuffer               *xr_scope_constants;
+     RhiView                 *xr_scope_image;
+@@ -1143,6 +1143,18 @@
+         V.rt_color->xr_array && V.rt_depth && V.rt_depth->xr_array;
+ }
+ 
++int tsfp_vk_ghost_ready(void)
++{
++    return !V.xr_ghost_eye && tsfp_vk_uplink_world_bound() &&
++           V.rt_color->xr_right && V.rt_depth->xr_right;
++}
++
++void tsfp_vk_ghost_eye(unsigned eye)
++{
++    end_rendering();
++    V.xr_ghost_eye = eye;
++}
++
+ const RhiMacro *tsfp_vk_stereo_macros(void)
+ {
+     static const RhiMacro macros[] = { { "TSFP_STEREO_GEOMETRY", "1" }, { NULL, NULL } };
+@@ -1205,7 +1217,8 @@
+         dv = d->view;
+     uint32_t view_mask = 0;
+ #ifdef TSFP_OPENXR
+-    if (d && (V.xr_uplink_eye_mask == 2 || V.xr_effect_view_mask == 2) && d->xr_right)
++    if (d && d->xr_right &&
++        (V.xr_uplink_eye_mask == 2 || V.xr_effect_view_mask == 2 || V.xr_ghost_eye == 2))
+         dv = d->xr_right;
+     VkMultisampledRenderToSingleSampledInfoEXT msaa = {
+         .sType = VK_STRUCTURE_TYPE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_INFO_EXT,
+@@ -1237,7 +1250,13 @@
+         }
+         if (!c->xr_array || (d && !d->xr_array))
+             V.xr_world_active = 0;
+-        if (V.xr_world_active && V.xr_effect_view_mask && xr_late_screen_effect() &&
++        if (V.xr_world_active && V.xr_ghost_eye) {
++            /* The guest has already projected this pass for one eye. Use a
++             * single layer, as also required by its mono color scratch and
++             * the corresponding layer of the shared scene depth. */
++            if (V.xr_ghost_eye == 2)
++                cv = c->xr_right;
++        } else if (V.xr_world_active && V.xr_effect_view_mask && xr_late_screen_effect() &&
+             c->xr_right && (!d || d->xr_right)) {
+             /* The shatter compositor preserves the resolved color/depth of
+              * one eye per pass. Bind that layer directly without MSAA. */
+@@ -3027,7 +3046,7 @@
+ #ifdef TSFP_OPENXR
+     /* A mono pass can clear a depth surface also used by the stereo
+      * scene. Clear both layers outside the scope in that case. */
+-    if (v->xr_array && !V.view_mask)
++    if (v->xr_array && !V.view_mask && !V.xr_ghost_eye)
+         return 0;
+ #endif
+     memset(&a, 0, sizeof a);
+@@ -3049,7 +3068,7 @@
+ static uint32_t clear_view_layers(const RhiView *v)
+ {
+ #ifdef TSFP_OPENXR
+-    if (v->xr_array && !V.xr_uplink_eye_mask)
++    if (v->xr_array && !V.xr_uplink_eye_mask && !V.xr_ghost_eye)
+         return 2;
+ #endif
+     return v->layers ? v->layers : 1;
+@@ -3058,7 +3077,7 @@
+ static uint32_t clear_view_base_layer(const RhiView *v)
+ {
+ #ifdef TSFP_OPENXR
+-    if (v->xr_array && V.xr_uplink_eye_mask == 2)
++    if (v->xr_array && (V.xr_uplink_eye_mask == 2 || V.xr_ghost_eye == 2))
+         return 1;
+ #endif
+     return v->base_layer;
+@@ -4279,6 +4298,8 @@
+     memset(xr_kind_counts, 0, sizeof xr_kind_counts);
+ }
+ 
++extern int tsfp_quest_spirit_billboard(void);
++
+ static int xr_hud_draw(void)
+ {
+     return V.view_mask && V.xr_world_active && V.xr_hud_constants &&
+@@ -4361,9 +4382,12 @@
+         }
+         return V.xr_turret_reticle_constants;
+     }
+-    if (!V.xr_draw_world && !tracked_weapon)
++    /* 1D5F0 builds spirit billboards in 3D; their shader does not use the
++     * same projection constant slots as the usual model shaders. */
++    const int world_draw = V.xr_draw_world || tsfp_quest_spirit_billboard();
++    if (!world_draw && !tracked_weapon)
+         return V.xr_identity_constants;
+-    if (V.view_mask == XR_SCOPE_MASK && V.xr_draw_world && role == TSFP_MODEL_DEFAULT) {
++    if (V.view_mask == XR_SCOPE_MASK && world_draw && role == TSFP_MODEL_DEFAULT) {
+         V.xr_scope_drawn = 1;
+         return V.xr_scope_constants;
+     }
+@@ -4450,8 +4474,11 @@
+ #ifdef TSFP_OPENXR
+             /* Only the scoped effects may composite a scene copy back into
+              * the stereo scene. Other guest draws retain the stereo view. */
+-            if ((V.view_mask || V.xr_effect_view_mask || V.xr_uplink_eye_mask) &&
+-                v && v->image->xr_frame_copy) {
++            if (V.xr_ghost_eye && v && v->image->xr_frame_paired) {
++                if (V.xr_ghost_eye == 2)
++                    v = v->image->xr_right_frame;
++            } else if ((V.view_mask || V.xr_effect_view_mask || V.xr_uplink_eye_mask) &&
++                       v && v->image->xr_frame_copy) {
+                 if (tsfp_stereo_uplink_map_source()) {
+                     /* The game assembles the handheld map in guest screen
+                      * coordinates, using the primary copy for its scratch texture. */
+@@ -4489,7 +4516,7 @@
+             ii[n].sampler = VK_NULL_HANDLE;
+             ii[n].imageView = v->view;
+ #ifdef TSFP_OPENXR
+-            if ((V.xr_uplink_eye_mask == 2 || V.xr_effect_view_mask == 2) &&
++            if ((V.xr_uplink_eye_mask == 2 || V.xr_effect_view_mask == 2 || V.xr_ghost_eye == 2) &&
+                 v->image == V.xr_world_color) {
+                 if (!v->xr_right)
+                     return 0;
+@@ -4573,7 +4600,8 @@
+     if (use_scissor && fullscreen && !V.xr_uplink_eye_mask)
+         use_scissor = 0;
+     if (use_scissor && V.view_mask && !tsfp_stereo_uplink_map_source() &&
+-        (V.xr_draw_world || role != TSFP_MODEL_DEFAULT || xr_hud_draw() || xr_turret_reticle_draw())) {
++        (V.xr_draw_world || tsfp_quest_spirit_billboard() || role != TSFP_MODEL_DEFAULT ||
++         xr_hud_draw() || xr_turret_reticle_draw())) {
+         static int logged_scissor;
+         if (!logged_scissor && (V.scissor.left > 0 || V.scissor.top > 0 ||
+             V.scissor.right < (int32_t)V.area.width || V.scissor.bottom < (int32_t)V.area.height)) {
+@@ -4812,7 +4840,7 @@
+ 
+ static int xr_effect_needs_eye_draws(void)
+ {
+-    if (!tsfp_stereo_screen_effect_draw() || V.xr_uplink_eye_mask ||
++    if (!tsfp_stereo_screen_effect_draw() || V.xr_uplink_eye_mask || V.xr_ghost_eye ||
+         !V.xr_world_active || !V.ps || !V.rt_color)
+         return 0;
+     if (!xr_world_target() && V.rt_color->image->xr_frame_paired)
+@@ -4837,6 +4865,18 @@
+         return 0;
+ #ifdef TSFP_OPENXR
+     xr_log_screen_effect();
++#ifndef TSFP_RELEASE
++    if (V.xr_ghost_eye && V.rt_color) {
++        static unsigned reported;
++        const int scene = V.rt_color->image == V.xr_world_color;
++        const unsigned bit = 1u << (2 * (V.xr_ghost_eye - 1) + scene);
++        if (!(reported & bit)) {
++            reported |= bit;
++            fprintf(stderr, "[XR-GHOST] Eye %u %s pass, %ux%u\n", V.xr_ghost_eye,
++                    scene ? "scene" : "scratch", V.area.width, V.area.height);
++        }
++    }
++#endif
+     // Opening a render scope or clearing depth does not write the color copy.
+     if (!V.xr_effect_view_mask && V.rt_color && blend_desc()->write_mask)
+         xr_invalidate_frame_copy(V.rt_color->image);
+@@ -4938,7 +4978,8 @@
+ 
+ int tsfp_vk_stereo_effect_extent(uint32_t *width, uint32_t *height)
+ {
+-    return tsfp_stereo_screen_effect_draw() && tsfp_vk_stereo_snapshot_extent(width, height);
++    return (tsfp_stereo_screen_effect_draw() || V.xr_ghost_eye) &&
++           tsfp_vk_stereo_snapshot_extent(width, height);
+ }
+ 
+ int tsfp_vk_stereo_snapshot(RhiImage *destination)

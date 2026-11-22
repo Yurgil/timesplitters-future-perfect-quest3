@@ -1,0 +1,71 @@
+--- a/src/d3d/d3d8_device.c
++++ b/src/d3d/d3d8_device.c
+@@ -18,6 +18,7 @@
+ #include "d3d8_internal.h"
+ #ifdef TSFP_OPENXR
+ #include "stereo_backend.h"
++#include "xr.h"
+ #endif
+ #ifdef TSFP_TEXTURE_PACK
+ #include "texture_pack.h"
+@@ -451,6 +452,12 @@
+         }
+     }
+ 
++#ifdef TSFP_OPENXR
++    /* The XR layer sizes the entire Story frame to the headset's FOV. */
++    if (tsfp_xr_story_screen())
++        fit = (D3D8DisplayFit){ 0, 0, s->swap_width, s->swap_height };
++    else
++#endif
+     {
+         UINT shape_w, shape_h;
+ 
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -1182,7 +1182,8 @@
+ static int xr_fullscreen_draw(void)
+ {
+     return (V.xr_effect_view_mask && V.xr_world_active && xr_world_target()) ||
+-           (V.view_mask && (V.xr_uplink_eye_mask || tsfp_stereo_screen_effect_draw()));
++           (V.view_mask && (V.xr_uplink_eye_mask || tsfp_stereo_screen_effect_draw())) ||
++           (V.rt_color && V.rt_color->image == V.xr_world_color && tsfp_stereo_screen_overlay_draw());
+ }
+ 
+ static int xr_late_screen_effect(void)
+--- a/titles/futureperfect/src/recomp_manual.c
++++ b/titles/futureperfect/src/recomp_manual.c
+@@ -1363,19 +1363,9 @@
+ void sub_0001EFB0(void)
+ {
+ #ifdef TSFP_QUEST_STEREO_PROBE
+-    extern int tsfp_xr_geometry_enabled(void);
+-    const uint32_t rectangle_caller = FP_MEM32(g_esp);
+-    if ((rectangle_caller == 0x0006F322u || rectangle_caller == 0x0006F34Bu ||
+-         rectangle_caller == 0x0013970Eu || rectangle_caller == 0x0013972Eu) &&
+-        tsfp_xr_geometry_enabled()) {
+-        static int reported;
+-        if (!reported) {
+-            reported = 1;
+-            fprintf(stderr, "[6DoF] Suppressed cinematic bars\n");
+-        }
+-        g_esp += sizeof(uint32_t);
++    extern int tsfp_quest_rect_overlay(void (*draw)(void));
++    if (tsfp_quest_rect_overlay(sub_0001EFB0_gen))
+         return;
+-    }
+ #endif
+ #if defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
+     uint32_t frame = g_esp, caller = FP_MEM32(frame);
+@@ -1934,6 +1924,11 @@
+ extern void sub_000F90D0_gen(void);
+ void sub_000F90D0(void)
+ {
++#ifdef TSFP_QUEST_STEREO_PROBE
++    extern int tsfp_quest_flash_overlay(void (*draw)(void));
++    if (tsfp_quest_flash_overlay(sub_000F90D0_gen))
++        return;
++#endif
+ #if defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
+     pc_display_flash_overlay(sub_000F90D0_gen);
+ #else

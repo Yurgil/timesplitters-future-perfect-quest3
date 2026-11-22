@@ -2,7 +2,6 @@ package org.tsfp.quest;
 
 import android.os.Bundle;
 import android.view.WindowManager;
-import android.widget.Toast;
 import java.io.File;
 import org.libsdl.app.SDLActivity;
 
@@ -11,10 +10,6 @@ public class MainActivity extends SDLActivity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        if (!BuildConfig.DIAGNOSTICS && !new File(gameDirectory(), "default.xbe").isFile()) {
-            Toast.makeText(this, "Copy your Xbox game files to Android/data/org.tsfp.quest/files/game",
-                    Toast.LENGTH_LONG).show();
-        }
     }
 
     @Override
@@ -42,7 +37,8 @@ public class MainActivity extends SDLActivity {
                 useOpenXR() ? "stereo_geometry" : "",
                 turnOverride,
                 Integer.toString(getIntent().getIntExtra("xr_msaa", 2)),
-                Integer.toString(getIntent().getIntExtra("xr_anisotropy", 4)), vrOptions
+                Integer.toString(getIntent().getIntExtra("xr_anisotropy", 4)), vrOptions,
+                new File(files, "hand-calibration.txt").getAbsolutePath()
             };
         }
         boolean benchmark = getIntent().getBooleanExtra("benchmark", false);
@@ -51,7 +47,7 @@ public class MainActivity extends SDLActivity {
         boolean stereoGeometry = getIntent().getBooleanExtra("stereo_geometry",
                 useOpenXR() && !benchmark && !stereoProbe && !projectionProbe);
         return new String[] {
-            new File(files, "game").getAbsolutePath(),
+            gameDirectory().getAbsolutePath(),
             (benchmark ? new File(cache, "benchmark-saves") : new File(files, "saves")).getAbsolutePath(),
             cache.getAbsolutePath(),
             new File(files, "boot.log").getAbsolutePath(),
@@ -63,17 +59,13 @@ public class MainActivity extends SDLActivity {
                 : stereoProbe ? "stereo_probe" : "",
             turnOverride,
             Integer.toString(getIntent().getIntExtra("xr_msaa", 2)),
-            Integer.toString(getIntent().getIntExtra("xr_anisotropy", 4)), vrOptions
+            Integer.toString(getIntent().getIntExtra("xr_anisotropy", 4)), vrOptions,
+            new File(files, "hand-calibration.txt").getAbsolutePath()
         };
     }
 
     private File gameDirectory() {
-        File internal = new File(getFilesDir(), "game");
-        if (new File(internal, "default.xbe").isFile()) {
-            return internal;
-        }
-        File external = getExternalFilesDir(null);
-        return external == null ? internal : new File(external, "game");
+        return LauncherActivity.gameDirectory(this);
     }
 
     protected boolean useOpenXR() {

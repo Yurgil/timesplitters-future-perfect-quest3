@@ -122,17 +122,24 @@ static inline XrVector3f tsfp_avatar_room_offset(XrVector3f anchor, XrVector3f h
     return offset;
 }
 
-/* Anchor and eye poses share the OpenXR local space. The output maps the
- * yaw-recentered anchor's meter coordinates to this eye's Vulkan clip space. */
-static inline XrMatrix4x4f tsfp_eye_clip_for_api(const XrPosef *anchor, const XrView *eye,
-                                               float near_z, float far_z, GraphicsAPI api)
+static inline XrMatrix4x4f tsfp_eye_from_anchor(const XrPosef *anchor, const XrView *eye)
 {
     XrMatrix4x4f local_from_anchor, local_from_eye, eye_from_local;
-    XrMatrix4x4f eye_from_anchor, clip_from_eye, clip_from_anchor;
+    XrMatrix4x4f eye_from_anchor;
     XrMatrix4x4f_CreateFromRigidTransform(&local_from_anchor, anchor);
     XrMatrix4x4f_CreateFromRigidTransform(&local_from_eye, &eye->pose);
     XrMatrix4x4f_InvertRigidBody(&eye_from_local, &local_from_eye);
     XrMatrix4x4f_Multiply(&eye_from_anchor, &eye_from_local, &local_from_anchor);
+    return eye_from_anchor;
+}
+
+/* Anchor and eye poses share the OpenXR local space. The output maps the
+ * yaw-recentered anchor's meter coordinates to this eye's clip space. */
+static inline XrMatrix4x4f tsfp_eye_clip_for_api(const XrPosef *anchor, const XrView *eye,
+                                               float near_z, float far_z, GraphicsAPI api)
+{
+    const XrMatrix4x4f eye_from_anchor = tsfp_eye_from_anchor(anchor, eye);
+    XrMatrix4x4f clip_from_eye, clip_from_anchor;
     XrMatrix4x4f_CreateProjectionFov(&clip_from_eye, api, eye->fov, near_z, far_z);
     XrMatrix4x4f_Multiply(&clip_from_anchor, &clip_from_eye, &eye_from_anchor);
     return clip_from_anchor;
@@ -147,18 +154,20 @@ static inline XrMatrix4x4f tsfp_eye_clip(const XrPosef *anchor, const XrView *ey
 /* Enclose both eye frusta with the union of their viewing directions.
  * Move the apex back to contain the displaced eye origins as well. */
 static inline int tsfp_stereo_visibility_clip(XrMatrix4x4f *out, const XrPosef *anchor,
-                                               const XrPosef *head, const XrView eyes[2],
+                                               const XrPosef *head, const XrView *views, unsigned count,
                                                float near_z, float far_z)
 {
     XrPosef head_from_local;
     XrPosef_Invert(&head_from_local, head);
     float left = INFINITY, right = -INFINITY, down = INFINITY, up = -INFINITY;
-    XrVector3f origins[2];
-    for (unsigned eye = 0; eye < 2; ++eye) {
+    XrVector3f origins[3];
+    if (count < 2 || count > 3)
+        return 0;
+    for (unsigned eye = 0; eye < count; ++eye) {
         XrPosef relative;
-        XrPosef_Multiply(&relative, &eyes[eye].pose, &head_from_local);
+        XrPosef_Multiply(&relative, &head_from_local, &views[eye].pose);
         origins[eye] = relative.position;
-        const XrFovf fov = eyes[eye].fov;
+        const XrFovf fov = views[eye].fov;
         const float x[2] = { tanf(fov.angleLeft), tanf(fov.angleRight) };
         const float y[2] = { tanf(fov.angleDown), tanf(fov.angleUp) };
         for (unsigned i = 0; i < 2; ++i) {
@@ -178,7 +187,7 @@ static inline int tsfp_stereo_visibility_clip(XrMatrix4x4f *out, const XrPosef *
     if (!(left < 0.0f && right > 0.0f && down < 0.0f && up > 0.0f))
         return 0;
     float setback = 0.0f;
-    for (unsigned eye = 0; eye < 2; ++eye) {
+    for (unsigned eye = 0; eye < count; ++eye) {
         const XrVector3f p = origins[eye];
         const float horizontal = fmaxf(p.x / left, p.x / right);
         const float vertical = fmaxf(p.y / down, p.y / up);
@@ -251,6 +260,19 @@ static inline void tsfp_xbox_pack_depth(XrMatrix4x4f *projection, float offset, 
     }
 }
 
+/* Guest effects that project actor bounds on the CPU need the actual
+ * per-eye view and projection, as well as their product. */
+static inline void tsfp_xbox_eye_camera(const XrMatrix4x4f *game_view, const XrPosef *anchor,
+                                       const XrView *eye, float near_z, float far_z,
+                                       XrMatrix4x4f *view, XrMatrix4x4f *projection,
+                                       XrMatrix4x4f *view_projection)
+{
+    const XrMatrix4x4f eye_from_game = tsfp_eye_from_anchor(anchor, eye);
+    XrMatrix4x4f_Multiply(view, &eye_from_game, game_view);
+    XrMatrix4x4f_CreateProjectionFov(projection, GRAPHICS_D3D, eye->fov, near_z, far_z);
+    XrMatrix4x4f_Multiply(view_projection, projection, view);
+}
+
 /* Changes a game's clip-space vertex before rasterization. The game lens
  * provides its depth range, and the XR eye provides pose and aperture.
  * The RHI uses a negative Vulkan viewport height, so this path keeps +Y up. */
@@ -283,6 +305,28 @@ static inline int tsfp_xbox_eye_transform(XrMatrix4x4f *out, const XrMatrix4x4f 
     return tsfp_xbox_camera_planes(game_projection, &near_z, &far_z) &&
         tsfp_xbox_eye_transform_depth(out, game_projection, anchor, eye, meters_per_unit,
                                      near_z * meters_per_unit, far_z * meters_per_unit);
+}
+
+/* Put the original sprite on a plane across the turret's aim direction.
+ * The guest's depth was for a 2D overlay. Use one distance for both eyes
+ * while preserving the lens's angular size and center. */
+static inline XrMatrix4x4f tsfp_turret_reticle_transform(const XrMatrix4x4f *game,
+                                                        const XrPosef *anchor, const XrView *eye)
+{
+    const float distance = 10.0f;
+    const float z = copysignf(distance, game->m[11]);
+    const float w = game->m[11] * z;
+    XrMatrix4x4f panel = {{0}};
+    panel.m[0] = w / game->m[0];
+    panel.m[5] = w / game->m[5];
+    panel.m[12] = -game->m[8] * z / game->m[0];
+    panel.m[13] = -game->m[9] * z / game->m[5];
+    panel.m[14] = -distance;
+    panel.m[15] = 1.0f;
+    const XrMatrix4x4f clip_from_anchor = tsfp_eye_clip_for_api(anchor, eye, 0.1f, 100.0f, GRAPHICS_D3D);
+    XrMatrix4x4f transform;
+    XrMatrix4x4f_Multiply(&transform, &clip_from_anchor, &panel);
+    return transform;
 }
 
 #endif

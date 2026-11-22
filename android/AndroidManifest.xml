@@ -1,7 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.tsfp.quest"
-    android:versionCode="77"
-    android:versionName="0.3.74-xr">
+    android:versionCode="101"
+    android:versionName="0.3.98-xr">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
     <uses-feature android:name="android.hardware.vr.headtracking" android:version="1"
         android:required="false" />
@@ -19,6 +19,15 @@
     <application android:label="TimeSplitters Quest"
         android:allowBackup="false"
         android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity android:name=".LauncherActivity"
+            android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode|density"
+            android:launchMode="singleTask"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
         <activity android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:screenOrientation="landscape"
@@ -32,7 +41,6 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
             </intent-filter>
         </activity>

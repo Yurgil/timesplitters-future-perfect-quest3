@@ -14,11 +14,27 @@ typedef struct {
 
 enum { TSFP_WEAPON_OFF_SLOT, TSFP_WEAPON_MAIN_SLOT };
 enum {
+    TSFP_WEAPON_NO_STORY = -1,
+    TSFP_SCENE_TIME_TO_SPLIT = 2,
+    TSFP_SCENE_SCOTLAND = 4,
+    TSFP_SCENE_RUSSIAN_CONNECTION = 18,
+    TSFP_SCENE_MANSION = 1
+};
+enum {
     TSFP_WEAPON_KRUGER = 1,
+    TSFP_WEAPON_REVOLVER = 3,
+    TSFP_WEAPON_FLARE_GUN = 4,
+    TSFP_WEAPON_SNIPER_BOLT = 8,
+    TSFP_WEAPON_SNIPER_RIFLE = 9,
     TSFP_WEAPON_FLAMETHROWER = 10,
+    TSFP_WEAPON_SOVIET_RIFLE = 12,
     TSFP_WEAPON_SCIFI_HANDGUN = 14,
     TSFP_WEAPON_FUTURE_SNIPER = 17,
-    TSFP_WEAPON_PLASMA_MACHINE_GUN = 19
+    TSFP_WEAPON_PLASMA_MACHINE_GUN = 19,
+    TSFP_WEAPON_K_SMG = 30,
+    TSFP_WEAPON_MACHINE_GUN = 31,
+    TSFP_WEAPON_DOUBLE_BARREL = 32,
+    TSFP_WEAPON_BASEBALL_BAT = 33
 };
 
 /* Landmarks in the local coordinates of each Xbox XBR housing mesh. The
@@ -33,8 +49,8 @@ static const TsfpWeaponProfile tsfp_weapon_profiles[] = {
     [5]  = { "assaultshotgun_anim", 1, TSFP_WEAPON_GUN, {0,-.099f,-.050f}, {0,0,1}, {0,1,0}, {0,.073f,.994f} },
     [6]  = { "futureshotgun_anim", 1, TSFP_WEAPON_GUN, {0,-.096f,-.046f}, {0,0,1}, {0,1,0}, {0,.102f,.637f} },
     [7]  = { "minigun_anim", 1, TSFP_WEAPON_GUN, {-.101f,.090f,-.079f}, {0,0,1}, {0,1,0}, {.006f,.042f,1.181f} },
-    [8]  = { "sniperbolt_anim", 1, TSFP_WEAPON_GUN, {-.317f,0,-.101f}, {1,0,0}, {0,0,1}, {.6507f,0,0} },
-    [9]  = { "sniperrifle_anim", 1, TSFP_WEAPON_GUN, {-.281f,0,-.094f}, {1,0,0}, {0,0,1}, {.6507f,0,0} },
+    [TSFP_WEAPON_SNIPER_BOLT] = { "sniperbolt_anim", 1, TSFP_WEAPON_GUN, {-.317f,0,-.101f}, {1,0,0}, {0,0,1}, {.6507f,0,0} },
+    [TSFP_WEAPON_SNIPER_RIFLE] = { "sniperrifle_anim", 1, TSFP_WEAPON_GUN, {-.281f,0,-.094f}, {1,0,0}, {0,0,1}, {.6507f,0,0} },
     [TSFP_WEAPON_FLAMETHROWER] = { "flamethrower_anim", 1, TSFP_WEAPON_GUN, {0,-.042f,-.062f}, {0,0,-1}, {0,-1,0}, {0,.003f,-.835f} },
     [11] = { "harpoon_anim", 1, TSFP_WEAPON_GUN, {0,-.103f,.086f}, {0,0,1}, {0,1,0}, {0,.070f,.563f} },
     [12] = { "assaultrifle_anim", 1, TSFP_WEAPON_GUN, {0,-.140f,.093f}, {0,0,1}, {0,1,0}, {0,-.0111f,1.3223f} },
@@ -55,8 +71,8 @@ static const TsfpWeaponProfile tsfp_weapon_profiles[] = {
     [27] = { "detonator_anim", 1, TSFP_WEAPON_PROP, {0,-.011f,.023f}, {0,0,1}, {0,1,0}, {0} },
     [28] = { "remotemine_anim", 1, TSFP_WEAPON_PROP, {0,-.025f,0}, {0,0,1}, {0,1,0}, {0} },
     [29] = { "tnt_anim", 1, TSFP_WEAPON_PROP, {.018f,-.041f,0}, {0,0,1}, {0,1,0}, {0} },
-    [30] = { "nemosmg_anim", 1, TSFP_WEAPON_GUN, {0,-.120f,-.023f}, {0,0,1}, {0,1,0}, {0,.041f,.849f} },
-    [31] = { "machinepistol_anim", 1, TSFP_WEAPON_GUN, {0,-.140f,-.018f}, {0,0,1}, {0,1,0}, {0,.003f,.531f} },
+    [TSFP_WEAPON_K_SMG] = { "nemosmg_anim", 1, TSFP_WEAPON_GUN, {0,-.120f,-.023f}, {0,0,1}, {0,1,0}, {0,.041f,.849f} },
+    [TSFP_WEAPON_MACHINE_GUN] = { "machinepistol_anim", 1, TSFP_WEAPON_GUN, {0,-.140f,-.018f}, {0,0,1}, {0,1,0}, {0,.003f,.531f} },
     [32] = { "doublebarrelshotgun_anim", 1, TSFP_WEAPON_GUN, {0,-.080f,-.060f}, {0,0,1}, {0,1,0}, {0,.030f,.590f} },
     [33] = { "baseballbat_anim", 1, TSFP_WEAPON_PROP, {.005f,.118f,-.007f}, {0,1,0}, {0,0,-1}, {0} },
     [34] = { "timegrenade", 0, TSFP_WEAPON_PROP, {0,.010f,0}, {0,0,1}, {0,1,0}, {0} },
@@ -93,12 +109,13 @@ static inline int tsfp_weapon_basis(XrMatrix4x4f *basis, XrVector3f forward, XrV
     return 1;
 }
 
-static inline int tsfp_weapon_target(uint32_t id, unsigned hand, XrVector3f wrist,
+static inline int tsfp_weapon_target(uint32_t id, unsigned hand, int story_scene, XrVector3f wrist,
                                      XrQuaternionf aim, XrMatrix4x4f *target)
 {
     const TsfpWeaponProfile *profile = tsfp_weapon_profile(id);
     if (!profile)
         return 0;
+    const int story = story_scene != TSFP_WEAPON_NO_STORY;
 
     const XrVector3f aim_forward = {0,0,-1}, aim_up = {0,-1,0};
     XrVector3f forward, up;
@@ -109,7 +126,15 @@ static inline int tsfp_weapon_target(uint32_t id, unsigned hand, XrVector3f wris
         !tsfp_weapon_basis(&hand_basis, forward, up))
         return 0;
     XrMatrix4x4f_InvertRigidBody(&from_model_basis, &model_basis);
-    XrMatrix4x4f_Multiply(target, &hand_basis, &from_model_basis);
+    if (story && id == TSFP_WEAPON_BASEBALL_BAT) {
+        /* Pitch toward the top of the hand, around the grip. */
+        const XrMatrix4x4f pitch_up = {{1,0,0,0, 0,0,-1,0, 0,1,0,0, 0,0,0,1}};
+        XrMatrix4x4f pitched_hand;
+        XrMatrix4x4f_Multiply(&pitched_hand, &hand_basis, &pitch_up);
+        XrMatrix4x4f_Multiply(target, &pitched_hand, &from_model_basis);
+    } else {
+        XrMatrix4x4f_Multiply(target, &hand_basis, &from_model_basis);
+    }
     XrVector3f grip_point = profile->grip;
     /* This model's X axis runs across the grip. Mirror the lateral fit
      * for the left hand while keeping the model and bore orientation. */
@@ -117,14 +142,37 @@ static inline int tsfp_weapon_target(uint32_t id, unsigned hand, XrVector3f wris
         grip_point.x = -grip_point.x;
     XrVector3f grip, center, offset;
     XrMatrix4x4f_TransformVector3f(&grip, target, &grip_point);
-    /* Placement offsets in the controller's aim frame, in meters.
+    /* Placement offsets in the controller's aim frame (+left, +up, +forward), in meters.
      * Keep the authored grip point on the mesh even for large adjustments. */
     XrVector3f placement = {0, 0, .045f};
     switch (id) {
     case 0:  placement = (XrVector3f){.030f, -.050f, .065f}; break; /* Pistol 9mm */
-    case 9:  placement = (XrVector3f){.030f,  .020f, .045f}; break; /* Sniper Rifle */
-    case 12: placement = (XrVector3f){.030f, -.010f, .125f}; break; /* Soviet Rifle */
-    case 31: placement = (XrVector3f){.030f, -.040f, .095f}; break; /* Machine Gun */
+    case TSFP_WEAPON_SNIPER_RIFLE: placement = (XrVector3f){.030f, .020f, .045f}; break;
+    case TSFP_WEAPON_SOVIET_RIFLE: placement = (XrVector3f){.030f, -.010f, .125f}; break;
+    case TSFP_WEAPON_MACHINE_GUN: placement = (XrVector3f){.030f, -.040f, .095f}; break;
+    }
+    if (story) {
+        switch (id) {
+        case TSFP_WEAPON_REVOLVER:     placement = (XrVector3f){.030f, -.030f, .030f}; break;
+        case TSFP_WEAPON_FLARE_GUN:    placement = (XrVector3f){.030f, 0, .090f}; break;
+        case TSFP_WEAPON_SNIPER_RIFLE: placement = (XrVector3f){.030f, 0, .130f}; break;
+        case TSFP_WEAPON_FLAMETHROWER: placement = (XrVector3f){.030f, .060f, .060f}; break;
+        case TSFP_WEAPON_SOVIET_RIFLE: placement = (XrVector3f){.030f, 0, .040f}; break;
+        case TSFP_WEAPON_DOUBLE_BARREL: placement = (XrVector3f){.030f, 0, .050f}; break;
+        }
+    }
+    /* Scene IDs come from the US Xbox Story table at 0x004D1AC0. */
+    if (story_scene == TSFP_SCENE_SCOTLAND && id == TSFP_WEAPON_K_SMG)
+        placement = (XrVector3f){.020f, 0, .105f};
+    if (story_scene == TSFP_SCENE_RUSSIAN_CONNECTION && id == TSFP_WEAPON_SNIPER_RIFLE)
+        placement = (XrVector3f){.060f, 0, .180f};
+    if (story_scene == TSFP_SCENE_RUSSIAN_CONNECTION && id == TSFP_WEAPON_MACHINE_GUN)
+        placement.z += .080f;
+    if (story_scene == TSFP_SCENE_MANSION) {
+        if (id == TSFP_WEAPON_FLAMETHROWER)
+            placement = (XrVector3f){.030f, .150f, .160f};
+        if (id == TSFP_WEAPON_BASEBALL_BAT)
+            placement = (XrVector3f){.030f, 0, .095f};
     }
     XrMatrix4x4f_TransformVector3f(&offset, &hand_basis, &placement);
     XrVector3f_Add(&center, &wrist, &offset);

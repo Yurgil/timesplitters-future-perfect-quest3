@@ -1,5 +1,6 @@
 #include "uplink_math.h"
 #include "stereo_math.h"
+#include "sniper_scope.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -132,11 +133,52 @@ static void check_asset(unsigned id, const TsfpWeaponProfile *profile, const uin
     }
 }
 
-static void check_pose(unsigned id, const TsfpWeaponProfile *profile, unsigned hand, XrQuaternionf aim)
+static void check_scope(unsigned id, const TsfpScopeProfile *profile, int story_scene,
+                        const XrMatrix4x4f *mount, XrVector3f muzzle, XrVector3f forward)
+{
+    const TsfpScopeGeometry scope = tsfp_scope_geometry(id, profile, story_scene, mount);
+    XrVector3f expected_center = {-.270f, -.001f, .052f};
+    if (id == TSFP_WEAPON_SNIPER_BOLT && story_scene == TSFP_SCENE_RUSSIAN_CONNECTION)
+        expected_center = (XrVector3f){-.334f, -.0003f, .0598f};
+    if (id == TSFP_WEAPON_SNIPER_RIFLE)
+        expected_center = (XrVector3f){-.329f, -.0003f, .0598f};
+    if (id == TSFP_WEAPON_FUTURE_SNIPER)
+        expected_center = (XrVector3f){.001f,
+            story_scene == TSFP_SCENE_TIME_TO_SPLIT ? .145f : .140f, .207f};
+    near(scope.center, transformed(mount, expected_center));
+    near(scope.muzzle, muzzle);
+    near(scope.forward, forward);
+    const XrPosef anchor = {{0,.70710678f,0,.70710678f}, {2,1,-3}};
+    const XrVector4f on_axis = {muzzle.x + 40*forward.x, muzzle.y + 40*forward.y,
+        muzzle.z + 40*forward.z, 1};
+    const XrVector4f off_axis = {on_axis.x + .25f*scope.right.x, on_axis.y + .25f*scope.right.y,
+        on_axis.z + .25f*scope.right.z, 1};
+    XrMatrix4x4f game;
+    XrMatrix4x4f_CreateProjection(&game, GRAPHICS_D3D, -1, 1, 1, -1, .05f, 100.f);
+    XrVector4f guest_axis, guest_offset;
+    XrMatrix4x4f_TransformVector4f(&guest_axis, &game, &on_axis);
+    XrMatrix4x4f_TransformVector4f(&guest_offset, &game, &off_axis);
+    float previous_x = 0;
+    for (unsigned zoom = 0; zoom < TSFP_SCOPE_ZOOM_STEPS; ++zoom) {
+        const XrView view = tsfp_scope_view(&scope, zoom, &anchor);
+        XrMatrix4x4f reproject;
+        assert(tsfp_xbox_eye_transform_depth(&reproject, &game, &anchor, &view, 1, .05f, 100.f));
+        XrVector4f center, beside;
+        XrMatrix4x4f_TransformVector4f(&center, &reproject, &guest_axis);
+        XrMatrix4x4f_TransformVector4f(&beside, &reproject, &guest_offset);
+        assert(center.w > 0 && fabsf(center.x / center.w) < .001f && fabsf(center.y / center.w) < .001f);
+        const float x = beside.x / beside.w;
+        assert(x > previous_x && x < 1 && fabsf(beside.y / beside.w) < .001f);
+        previous_x = x;
+    }
+}
+
+static void check_pose(unsigned id, const TsfpWeaponProfile *profile, unsigned hand, int story_scene, XrQuaternionf aim)
 {
     const XrVector3f wrist = {hand ? .28f : -.28f, -.35f, -.51f};
     XrMatrix4x4f target;
-    assert(tsfp_weapon_target(id, hand, wrist, aim, &target));
+    assert(tsfp_weapon_target(id, hand, story_scene, wrist, aim, &target));
+    const int story = story_scene != TSFP_WEAPON_NO_STORY;
     XrVector3f forward, top;
     XrQuaternionf_RotateVector3f(&forward, &aim, &(XrVector3f){0,0,-1});
     XrQuaternionf_RotateVector3f(&top, &aim, &(XrVector3f){0,-1,0});
@@ -154,6 +196,26 @@ static void check_pose(unsigned id, const TsfpWeaponProfile *profile, unsigned h
     case 12: neutral_offset = (XrVector3f){.030f,  .010f, -.125f}; break;
     case 31: neutral_offset = (XrVector3f){.030f,  .040f, -.095f}; break;
     }
+    if (story) {
+        switch (id) {
+        case 3:  neutral_offset = (XrVector3f){.030f,  .030f, -.030f}; break;
+        case 4:  neutral_offset = (XrVector3f){.030f,  0,     -.090f}; break;
+        case 9:  neutral_offset = (XrVector3f){.030f,  0,     -.130f}; break;
+        case 10: neutral_offset = (XrVector3f){.030f, -.060f, -.060f}; break;
+        case 12: neutral_offset = (XrVector3f){.030f,  0,     -.040f}; break;
+        case 32: neutral_offset = (XrVector3f){.030f,  0,     -.050f}; break;
+        }
+    }
+    if (story_scene == TSFP_SCENE_SCOTLAND && id == 30)
+        neutral_offset = (XrVector3f){.020f, 0, -.105f};
+    if (story_scene == TSFP_SCENE_RUSSIAN_CONNECTION && id == 9)
+        neutral_offset = (XrVector3f){.060f, 0, -.180f};
+    if (story_scene == TSFP_SCENE_RUSSIAN_CONNECTION && id == 31)
+        neutral_offset = (XrVector3f){.030f, .040f, -.175f};
+    if (story_scene == TSFP_SCENE_MANSION && id == 10)
+        neutral_offset = (XrVector3f){.030f, -.150f, -.160f};
+    if (story_scene == TSFP_SCENE_MANSION && id == 33)
+        neutral_offset = (XrVector3f){.030f, 0, -.095f};
     XrQuaternionf_RotateVector3f(&expected_offset, &aim, &neutral_offset);
     near(from_wrist, expected_offset);
 
@@ -161,8 +223,13 @@ static void check_pose(unsigned id, const TsfpWeaponProfile *profile, unsigned h
     XrVector3f model_forward = difference(transformed(&target, profile->forward), origin);
     const XrVector3f model_top = difference(transformed(&target, profile->up), origin);
     XrVector3f_Normalize(&model_forward);
-    near(model_forward, forward);
-    assert(XrVector3f_Dot(&model_top, &top) > .1f);
+    if (story && id == TSFP_WEAPON_BASEBALL_BAT) {
+        near(model_forward, top);
+        near(model_top, (XrVector3f){-forward.x, -forward.y, -forward.z});
+    } else {
+        near(model_forward, forward);
+        assert(XrVector3f_Dot(&model_top, &top) > .1f);
+    }
     if (id == TSFP_WEAPON_FLAMETHROWER)
         near(difference(transformed(&target, (XrVector3f){0,-1,0}), origin), top);
 
@@ -182,6 +249,9 @@ static void check_pose(unsigned id, const TsfpWeaponProfile *profile, unsigned h
     tsfp_weapon_bore(profile, &target, &camera_muzzle, &camera_direction);
     near(camera_muzzle, model_muzzle);
     near(camera_direction, forward);
+    const TsfpScopeProfile *scope = tsfp_scope_profile(id);
+    if (scope)
+        check_scope(id, scope, story_scene, &target, camera_muzzle, camera_direction);
     XrMatrix4x4f world;
     const XrPosef world_pose = {{0,.70710678f,0,.70710678f}, {3,-2,7}};
     XrMatrix4x4f_CreateFromRigidTransform(&world, &world_pose);
@@ -227,6 +297,44 @@ static void check_cuff_pose(const TsfpWeaponProfile *profile, unsigned hand, XrQ
     near(transformed(&map_move, map_edge),
          transformed(&forearm, (XrVector3f){opening.x, -outside * .087f * .70f, opening.z}));
     near(transformed(&map_move, transformed(&forearm, outer_face)), transformed(&target, outer_face));
+
+    /* The guest's planar map is offset from the cone tip. Facing the eyes
+     * must keep that tip fixed and preserve the size of the textured quad. */
+    XrMatrix4x4f plane = forearm;
+    tsfp_matrix_set_position(&plane, transformed(&forearm, (XrVector3f){.07f,-.03f,.12f}));
+    const XrVector3f apex = transformed(&plane, (XrVector3f){.02f,-.045f,.04f});
+    const XrVector3f fixed_tip = transformed(&map_move, apex);
+    const XrVector3f center = transformed(&plane, (XrVector3f){0,.255f,0});
+    const XrVector3f edge_x = transformed(&plane, (XrVector3f){.09f,.255f,0});
+    const XrVector3f edge_y = transformed(&plane, (XrVector3f){0,.335f,0});
+    const XrVector3f before = transformed(&map_move, center);
+    XrVector3f right = transformed(&map_move, edge_x);
+    XrVector3f up = transformed(&map_move, edge_y);
+    XrVector3f_Sub(&right, &right, &before);
+    XrVector3f_Sub(&up, &up, &before);
+    const float width = XrVector3f_Length(&right), height = XrVector3f_Length(&up);
+    const XrVector3f eyes[] = {{.03f,.24f,.82f}, {-.58f,.21f,-.55f}};
+    for (unsigned i = 0; i < sizeof eyes / sizeof eyes[0]; ++i) {
+        XrMatrix4x4f faced = map_move;
+        tsfp_uplink_face_map(&faced, &plane, apex, eyes[i]);
+        near(transformed(&faced, apex), fixed_tip);
+        const XrVector3f faced_center = transformed(&faced, center);
+        right = transformed(&faced, edge_x);
+        up = transformed(&faced, edge_y);
+        XrVector3f_Sub(&right, &right, &faced_center);
+        XrVector3f_Sub(&up, &up, &faced_center);
+        assert(fabsf(XrVector3f_Length(&right) - width) < .0001f);
+        assert(fabsf(XrVector3f_Length(&up) - height) < .0001f);
+        XrVector3f normal, view;
+        XrVector3f_Cross(&normal, &right, &up);
+        XrVector3f_Sub(&view, &eyes[i], &faced_center);
+        XrVector3f_Normalize(&normal);
+        XrVector3f_Normalize(&view);
+        near(normal, view);
+    }
+    XrMatrix4x4f too_close = map_move;
+    tsfp_uplink_face_map(&too_close, &plane, apex, fixed_tip);
+    assert(!memcmp(&too_close, &map_move, sizeof map_move));
 }
 
 static void check_effect_pose(unsigned id, XrVector3f local_point)
@@ -234,7 +342,7 @@ static void check_effect_pose(unsigned id, XrVector3f local_point)
     XrMatrix4x4f guest_pose, controller_pose, effect_move, lens, packed_lens, from_clip, reprojection;
     XrMatrix4x4f_CreateTranslationRotationScale(&guest_pose, &(XrVector3f){.12f,-.10f,-.30f},
                                               &(XrQuaternionf){0,1,0,0}, &(XrVector3f){1,1,1});
-    assert(tsfp_weapon_target(id, TSFP_AVATAR_RIGHT, (XrVector3f){.25f,-.38f,-.45f},
+    assert(tsfp_weapon_target(id, TSFP_AVATAR_RIGHT, 1, (XrVector3f){.25f,-.38f,-.45f},
                               (XrQuaternionf){.5f,.5f,.5f,.5f}, &controller_pose));
     assert(tsfp_weapon_correction(&guest_pose, &controller_pose, &effect_move));
 
@@ -301,7 +409,7 @@ static void check_spawned_muzzle_particles(void)
     for (unsigned i = 0; i < sizeof yaw / sizeof yaw[0]; ++i) {
         const XrQuaternionf aim = {0, sinf(yaw[i]), 0, cosf(yaw[i])};
         XrMatrix4x4f target;
-        assert(tsfp_weapon_target(12, TSFP_AVATAR_RIGHT, (XrVector3f){.25f,-.38f,-.45f}, aim, &target));
+        assert(tsfp_weapon_target(12, TSFP_AVATAR_RIGHT, 1, (XrVector3f){.25f,-.38f,-.45f}, aim, &target));
         const XrVector3f model_muzzle = transformed(&target, rifle->muzzle);
         XrVector3f shot_origin, shot_direction, world_origin, world_direction;
         tsfp_weapon_bore(rifle, &target, &shot_origin, &shot_direction);
@@ -367,8 +475,13 @@ int main(int argc, char **argv)
             for (unsigned i = 0; i < sizeof poses / sizeof poses[0]; ++i)
                 if (profile->mount == TSFP_WEAPON_CUFF)
                     check_cuff_pose(profile, hand, poses[i]);
-                else
-                    check_pose(id, profile, hand, poses[i]);
+                else {
+                    check_pose(id, profile, hand, TSFP_WEAPON_NO_STORY, poses[i]);
+                    check_pose(id, profile, hand, TSFP_SCENE_TIME_TO_SPLIT, poses[i]);
+                    check_pose(id, profile, hand, TSFP_SCENE_SCOTLAND, poses[i]);
+                    check_pose(id, profile, hand, TSFP_SCENE_RUSSIAN_CONNECTION, poses[i]);
+                    check_pose(id, profile, hand, TSFP_SCENE_MANSION, poses[i]);
+                }
         ++passed;
     }
     assert(tsfp_weapon_profile(UINT32_MAX) == NULL && tsfp_weapon_profile(35) == NULL);

@@ -1,0 +1,104 @@
+--- a/src/d3d/d3d8_device.c
++++ b/src/d3d/d3d8_device.c
+@@ -18,7 +18,6 @@
+ #include "d3d8_internal.h"
+ #ifdef TSFP_OPENXR
+ #include "stereo_backend.h"
+-#include "xr.h"
+ #endif
+ #ifdef TSFP_TEXTURE_PACK
+ #include "texture_pack.h"
+@@ -452,12 +451,6 @@
+         }
+     }
+ 
+-#ifdef TSFP_OPENXR
+-    /* The XR layer sizes the entire Story frame to the headset's FOV. */
+-    if (tsfp_xr_story_screen())
+-        fit = (D3D8DisplayFit){ 0, 0, s->swap_width, s->swap_height };
+-    else
+-#endif
+     {
+         UINT shape_w, shape_h;
+ 
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -51,6 +51,7 @@
+ 
+ #include <ctype.h>
+ #include <float.h>
++#include <math.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -1182,8 +1183,8 @@
+ static int xr_fullscreen_draw(void)
+ {
+     return (V.xr_effect_view_mask && V.xr_world_active && xr_world_target()) ||
+-           (V.view_mask && (V.xr_uplink_eye_mask || tsfp_stereo_screen_effect_draw())) ||
+-           (V.rt_color && V.rt_color->image == V.xr_world_color && tsfp_stereo_screen_overlay_draw());
++           (V.view_mask && (V.xr_uplink_eye_mask || tsfp_stereo_screen_effect_draw() ||
++                            (xr_world_target() && tsfp_stereo_screen_overlay_draw())));
+ }
+ 
+ static int xr_late_screen_effect(void)
+@@ -3065,6 +3066,45 @@
+     vkCmdClearAttachments(cmd(), 1, &a, 1, &r);
+     return 1;
+ }
++
++#ifdef TSFP_OPENXR
++int tsfp_vk_cinematic_matte(uint32_t caller, int top, float edge)
++{
++    if (!V.xr_world_active || !xr_world_target() || !begin_rendering() || (V.view_mask & 3u) != 3u)
++        return 0;
++    const uint32_t y = (uint32_t)(fminf(1.0f, fmaxf(0.0f, edge)) * V.area.height + 0.5f);
++    const uint32_t height = top ? y : V.area.height - y;
++    if (height) {
++        const VkClearAttachment black = {
++            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++            .colorAttachment = 0,
++            .clearValue.color.float32 = { 0, 0, 0, 1 },
++        };
++        const VkClearRect band = {
++            .rect = { { 0, top ? 0 : (int32_t)y }, { V.area.width, height } },
++            .layerCount = 1,
++        };
++        vkCmdClearAttachments(cmd(), 1, &black, 1, &band);
++#ifndef TSFP_RELEASE
++        static uint32_t reported[6];
++        for (unsigned i = 0; i < sizeof reported / sizeof reported[0]; ++i) {
++            if (reported[i] == caller)
++                break;
++            if (!reported[i]) {
++                reported[i] = caller;
++                fprintf(stderr, "[XR-MATTE] guest=%08x y=%d rect=%ux%u target=%ux%u eyes=%u\n",
++                        caller, band.rect.offset.y, V.area.width, height,
++                        V.area.width, V.area.height, V.view_mask);
++                break;
++            }
++        }
++#else
++        (void)caller;
++#endif
++    }
++    return 1;
++}
++#endif
+ 
+ static uint32_t clear_view_layers(const RhiView *v)
+ {
+--- a/titles/futureperfect/src/recomp_manual.c
++++ b/titles/futureperfect/src/recomp_manual.c
+@@ -1541,7 +1541,10 @@
+ extern void sub_0013FC50_gen(void);
+ void sub_0013FC50(void)
+ {
+-#if defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
++#if defined(TSFP_QUEST_STEREO_PROBE)
++    extern void tsfp_quest_chapter_title(void (*draw)(void));
++    tsfp_quest_chapter_title(sub_0013FC50_gen);
++#elif defined(TSFP_PC_CONTROLS) || defined(TSFP_NATIVE_DISPLAY)
+     pc_display_ui(sub_0013FC50_gen,0x0013FC50u);
+ #else
+     sub_0013FC50_gen();

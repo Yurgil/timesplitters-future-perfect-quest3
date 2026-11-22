@@ -123,7 +123,7 @@ static void load_test_input(const char *cache)
 __attribute__((visibility("default")))
 int tsfp_android_main(int argc, char **argv)
 {
-    if (argc != 13)
+    if (argc != 14)
         return 2;
 #ifdef TSFP_RELEASE
     int log_fd = open("/dev/null", O_WRONLY);
@@ -143,7 +143,7 @@ int tsfp_android_main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);
 #endif
     if (strcmp(argv[6], "openxr") == 0) {
-        tsfp_xr_enable(argv[5], argv[8], argv[3],
+        tsfp_xr_enable(argv[5], argv[8], argv[3], argv[13],
                        strcmp(argv[10], "2") == 0 ? 2 : 1, strcmp(argv[11], "4") == 0 ? 4 : 1);
         tsfp_vr_options_init(argv[12], argv[9]);
     }

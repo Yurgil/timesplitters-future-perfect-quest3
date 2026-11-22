@@ -12,6 +12,8 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include "projection_probe.h"
+#include "sniper_scope.h"
+#include "stereo_backend.h"
 #include "stereo_math.h"
 #include "stereo_probe.h"
 
@@ -44,6 +46,7 @@ static char shield_capture_request[4096];
 static int shield_capture;
 #endif
 static char hand_calibration_request[4096], hand_calibration_file[4096];
+static char legacy_hand_calibration_file[4096];
 static atomic_int pending_hand_calibration;
 static struct {
     int running, acquired, frame_open, positioned, eyes_valid, early_frame;
@@ -61,13 +64,19 @@ static struct {
     XrPosef anchor;
     VkExtent2D geometry_extent;
     XrView eyes[TSFP_XR_EYES];
-    XrVector4f object_planes[TSFP_XR_EYES][TSFP_FRUSTUM_PLANES];
+    XrVector4f object_planes[TSFP_XR_EYES + 1][TSFP_FRUSTUM_PLANES];
+    unsigned object_views;
     uint64_t pose_ticks;
     XrPath hands[HANDS];
     XrSpace touch_space[TOUCH_POSES][HANDS];
     XrPosef touch_pose[TOUCH_POSES][HANDS];
     unsigned touch_valid;
     TsfpRightStickState right_stick;
+    struct {
+        uint32_t weapon, previous_buttons;
+        unsigned zoom;
+        int active;
+    } scope;
     int last_snap_degrees;
     XrActionSet controls;
     XrAction actions[ACTIONS];
@@ -147,6 +156,7 @@ static int ok(XrResult result, const char *operation)
     CHECK(xrGetInstanceProcAddr((instance), #name, (PFN_xrVoidFunction *)&(pointer)))
 
 void tsfp_xr_enable(const char *prefix, const char *probe, const char *cache,
+                    const char *hand_calibration,
                     unsigned msaa, unsigned anisotropy)
 {
     enabled = 1;
@@ -168,9 +178,12 @@ void tsfp_xr_enable(const char *prefix, const char *probe, const char *cache,
 #else
     (void)prefix;
 #endif
-    if (snprintf(hand_calibration_file, sizeof hand_calibration_file, "%s/hand-calibration.txt", cache) >=
+    if (snprintf(hand_calibration_file, sizeof hand_calibration_file, "%s", hand_calibration) >=
         (int)sizeof hand_calibration_file)
         hand_calibration_file[0] = '\0';
+    if (snprintf(legacy_hand_calibration_file, sizeof legacy_hand_calibration_file,
+                 "%s/hand-calibration.txt", cache) >= (int)sizeof legacy_hand_calibration_file)
+        legacy_hand_calibration_file[0] = '\0';
     projection_requested = strcmp(probe, "projection_probe") == 0;
     geometry_requested = strcmp(probe, "stereo_geometry") == 0;
     geometry_disabled = 0;
@@ -211,6 +224,11 @@ int tsfp_xr_take_hand_calibration(void)
 const char *tsfp_xr_hand_calibration_file(void)
 {
     return hand_calibration_file;
+}
+
+const char *tsfp_xr_legacy_hand_calibration_file(void)
+{
+    return legacy_hand_calibration_file;
 }
 
 /* Holding both thumbsticks down for two seconds requests hand calibration. */
@@ -296,7 +314,7 @@ void tsfp_xr_capture_frame(RhiImage *world)
     static unsigned frames;
     if (++frames % 60)
         return;
-    const int requested = world && *capture_request && access(capture_request, F_OK) == 0;
+    const int requested = *capture_request && access(capture_request, F_OK) == 0;
     const char *prefix = requested ? on_demand_prefix : capture_prefix;
     if (!prefix || !*prefix)
         return;
@@ -337,7 +355,7 @@ void tsfp_xr_capture_frame(RhiImage *world)
             snprintf(temp, sizeof temp, "%s-%s.tmp", prefix, suffix) < (int)sizeof temp &&
             SDL_SaveBMP(surface, temp) && rename(temp, file) == 0 && requested) {
             unlink(capture_request);
-            fprintf(stderr, "[M4] Captured %ux%u per eye\n", width, height);
+            fprintf(stderr, "[M4] Captured %ux%u %s\n", width, height, world ? "per eye" : "game quad");
             log_touch_poses();
         }
     }
@@ -695,6 +713,7 @@ static void locate_touch_poses(void)
 static void reset_vr_controls(void)
 {
     xr.right_stick = (TsfpRightStickState){0};
+    xr.scope.active = 0;
     atomic_store_explicit(&pending_snap, 0, memory_order_relaxed);
 }
 
@@ -714,6 +733,34 @@ static void vr_right_stick(RecompPadState *state, XrVector2f stick, int mounted)
         atomic_store(&pending_snap, input.snap_degrees);
 }
 
+static void sync_scope_controls(RecompPadState *state, int immersive, int calibrating)
+{
+    const uint32_t pressed = state->buttons & ~xr.scope.previous_buttons;
+    xr.scope.previous_buttons = state->buttons;
+    unsigned hand;
+    const uint32_t weapon = immersive && tsfp_vk_scope_supported() ?
+        tsfp_stereo_scope_weapon(&hand) : UINT32_MAX;
+    if (weapon != xr.scope.weapon || weapon == UINT32_MAX || !tsfp_xr_touch_tracked(hand))
+        xr.scope.active = 0;
+    xr.scope.weapon = weapon;
+    if (weapon == UINT32_MAX)
+        return;
+
+    /* The default Xbox aim button normally zooms the entire game camera. */
+    state->buttons &= ~RECOMP_PAD_RIGHT_THUMB;
+    if (!calibrating && (pressed & RECOMP_PAD_RIGHT_THUMB) && tsfp_xr_touch_tracked(hand)) {
+        xr.scope.active = !xr.scope.active;
+        xr.scope.zoom = 0;
+    }
+    if (xr.scope.active) {
+        if ((pressed & RECOMP_PAD_DPAD_UP) && xr.scope.zoom + 1 < TSFP_SCOPE_ZOOM_STEPS)
+            ++xr.scope.zoom;
+        if ((pressed & RECOMP_PAD_DPAD_DOWN) && xr.scope.zoom)
+            --xr.scope.zoom;
+        state->buttons &= ~(RECOMP_PAD_DPAD_UP | RECOMP_PAD_DPAD_DOWN);
+    }
+}
+
 static void sync_controls(int immersive)
 {
     RecompPadState state = {0};
@@ -722,6 +769,7 @@ static void sync_controls(int immersive)
     xr.touch_valid = 0;
     if (xr.state != XR_SESSION_STATE_FOCUSED || xrSyncActions(xr.session, &sync) != XR_SUCCESS) {
         reset_vr_controls();
+        xr.scope.previous_buttons = UINT32_MAX;
         publish_pad(state);
         return;
     }
@@ -760,12 +808,18 @@ static void sync_controls(int immersive)
         else if (mounted) state.buttons |= RECOMP_PAD_B;
         else state.buttons |= RECOMP_PAD_DPAD_DOWN; /* Grenade type. */
     }
-    if (button(Y, LEFT)) state.buttons |= immersive && !mounted ? RECOMP_PAD_DPAD_UP : RECOMP_PAD_Y;
+    if (button(Y, LEFT)) {
+        /* The Xbox vehicle update uses Y to request getting out of any seat. */
+        state.buttons |= immersive && !mounted && !tsfp_stereo_in_vehicle() ?
+            RECOMP_PAD_DPAD_UP : RECOMP_PAD_Y;
+    }
     if (button(MENU, LEFT)) state.buttons |= RECOMP_PAD_START;
     if (button(CLICK, LEFT)) state.buttons |= RECOMP_PAD_LEFT_THUMB;
     if (button(CLICK, RIGHT)) state.buttons |= RECOMP_PAD_RIGHT_THUMB;
-    watch_hand_calibration(immersive && (state.buttons & RECOMP_PAD_LEFT_THUMB) &&
-                           (state.buttons & RECOMP_PAD_RIGHT_THUMB));
+    const int calibrating = immersive && (state.buttons & RECOMP_PAD_LEFT_THUMB) &&
+        (state.buttons & RECOMP_PAD_RIGHT_THUMB);
+    watch_hand_calibration(calibrating);
+    sync_scope_controls(&state, immersive, calibrating);
     static int logged;
     if (!logged && (state.buttons || state.lx || state.ly || state.rx || state.ry ||
                     state.left_trigger || state.right_trigger)) {
@@ -948,6 +1002,61 @@ int tsfp_xr_world_active(void)
     return xr.world_active;
 }
 
+void tsfp_xr_ghost_camera(const float game_view[16], float eyes[TSFP_XR_EYES][TSFP_GHOST_CAMERA_MATRICES][16])
+{
+    XrMatrix4x4f game;
+    memcpy(game.m, game_view, sizeof game.m);
+    for (unsigned eye = 0; eye < TSFP_XR_EYES; ++eye) {
+        XrMatrix4x4f view, projection, view_projection;
+        tsfp_xbox_eye_camera(&game, &xr.anchor, &xr.eyes[eye], xr.world_near, xr.world_far,
+                            &view, &projection, &view_projection);
+        memcpy(eyes[eye][TSFP_GHOST_CAMERA_VIEW], view.m, sizeof view.m);
+        memcpy(eyes[eye][TSFP_GHOST_CAMERA_PROJECTION], projection.m, sizeof projection.m);
+        memcpy(eyes[eye][TSFP_GHOST_CAMERA_VIEW_PROJECTION], view_projection.m, sizeof view_projection.m);
+    }
+}
+
+static int scope_view(XrView *view)
+{
+    TsfpScopeGeometry geometry;
+    if (!xr.scope.active || !tsfp_stereo_scope_camera(xr.scope.weapon, &geometry))
+        return 0;
+    *view = tsfp_scope_view(&geometry, xr.scope.zoom, &xr.anchor);
+    return 1;
+}
+
+int tsfp_xr_scope_matrices(float rows[16])
+{
+    XrView view;
+    XrMatrix4x4f game, clip;
+    if (!xr.world_active || !scope_view(&view) || !tsfp_stereo_world_projection(game.m))
+        return 0;
+    if (!tsfp_xbox_eye_transform_depth(&clip, &game, &xr.anchor, &view, 1, xr.world_near, xr.world_far))
+        return 0;
+    for (unsigned row = 0; row < 4; ++row)
+        for (unsigned col = 0; col < 4; ++col)
+            rows[row * 4 + col] = clip.m[col * 4 + row];
+    return 1;
+}
+
+int tsfp_xr_scope_lens(TsfpScopeGeometry *geometry, float rows[32])
+{
+    XrVector3f body_offset;
+    if (!xr.world_active || !xr.scope.active ||
+        !tsfp_stereo_scope_lens(xr.scope.weapon, geometry, &body_offset))
+        return 0;
+    XrPosef anchor = xr.anchor;
+    XrVector3f_Add(&anchor.position, &anchor.position, &body_offset);
+    for (unsigned eye = 0; eye < TSFP_XR_EYES; ++eye) {
+        const XrMatrix4x4f clip = tsfp_eye_clip_for_api(&anchor, &xr.eyes[eye],
+                                                      xr.world_near, xr.world_far, GRAPHICS_D3D);
+        for (unsigned row = 0; row < 4; ++row)
+            for (unsigned col = 0; col < 4; ++col)
+                rows[eye * 16 + row * 4 + col] = clip.m[col * 4 + row];
+    }
+    return 1;
+}
+
 int tsfp_xr_visibility_matrix(const float game_view[16], const float game_lens[16], float result[16], int objects)
 {
     if (!tsfp_xr_avatar_ready())
@@ -960,13 +1069,19 @@ int tsfp_xr_visibility_matrix(const float game_view[16], const float game_lens[1
         return 0;
     near_z = fminf(near_z, 0.06f);
     const XrPosef head = { head_orientation(), head_position() };
-    if (!tsfp_stereo_visibility_clip(&visibility, &xr.anchor, &head, xr.eyes, near_z, far_z))
+    XrView views[TSFP_XR_EYES + 1] = {xr.eyes[LEFT], xr.eyes[RIGHT]};
+    unsigned count = TSFP_XR_EYES;
+    if (scope_view(&views[count]) &&
+        tsfp_stereo_visibility_clip(&visibility, &xr.anchor, &head, views, count + 1, near_z, far_z))
+        ++count;
+    else if (!tsfp_stereo_visibility_clip(&visibility, &xr.anchor, &head, views, count, near_z, far_z))
         return 0;
     XrMatrix4x4f_Multiply(&clip, &visibility, &view);
     memcpy(result, clip.m, sizeof clip.m);
     if (objects) {
-        for (unsigned eye = 0; eye < TSFP_XR_EYES; ++eye) {
-            const XrMatrix4x4f eye_clip = tsfp_eye_clip_for_api(&xr.anchor, &xr.eyes[eye], near_z, far_z, GRAPHICS_D3D);
+        xr.object_views = count;
+        for (unsigned eye = 0; eye < count; ++eye) {
+            const XrMatrix4x4f eye_clip = tsfp_eye_clip_for_api(&xr.anchor, &views[eye], near_z, far_z, GRAPHICS_D3D);
             XrMatrix4x4f_Multiply(&clip, &eye_clip, &view);
             tsfp_clip_planes(xr.object_planes[eye], &clip);
         }
@@ -983,8 +1098,10 @@ int tsfp_xr_object_outside(const float minimum[3], const float maximum[3])
     const float margin = 0.10f;
     const XrVector3f lo = { minimum[0] - margin, minimum[1] - margin, minimum[2] - margin };
     const XrVector3f hi = { maximum[0] + margin, maximum[1] + margin, maximum[2] + margin };
-    return tsfp_box_outside_frustum(xr.object_planes[LEFT], lo, hi) &&
-           tsfp_box_outside_frustum(xr.object_planes[RIGHT], lo, hi);
+    for (unsigned eye = 0; eye < xr.object_views; ++eye)
+        if (!tsfp_box_outside_frustum(xr.object_planes[eye], lo, hi))
+            return 0;
+    return xr.object_views != 0;
 }
 
 int tsfp_xr_weapon_matrices(const float projection[16], float rows[32])
@@ -1097,6 +1214,20 @@ int tsfp_xr_hud_matrices(float rows[32])
     return 1;
 }
 
+int tsfp_xr_turret_reticle_matrices(float rows[32])
+{
+    XrMatrix4x4f game;
+    if (!xr.world_active || !tsfp_stereo_world_projection(game.m))
+        return 0;
+    for (unsigned eye = 0; eye < TSFP_XR_EYES; ++eye) {
+        const XrMatrix4x4f transform = tsfp_turret_reticle_transform(&game, &xr.anchor, &xr.eyes[eye]);
+        for (unsigned r = 0; r < 4; ++r)
+            for (unsigned c = 0; c < 4; ++c)
+                rows[eye * 16 + r * 4 + c] = transform.m[c * 4 + r];
+    }
+    return 1;
+}
+
 static int moved_body_rows(float rows[32], const XrMatrix4x4f *game, XrVector3f body_offset,
                            const XrMatrix4x4f *camera_move)
 {
@@ -1115,6 +1246,17 @@ static int moved_body_rows(float rows[32], const XrMatrix4x4f *game, XrVector3f 
                 rows[eye * 16 + r * 4 + c] = transform.m[c * 4 + r];
     }
     return 1;
+}
+
+XrVector3f tsfp_xr_body_eye_position(XrVector3f body_offset)
+{
+    XrPosef body = xr.anchor, camera_from_local;
+    XrVector3f_Add(&body.position, &body.position, &body_offset);
+    XrPosef_Invert(&camera_from_local, &body);
+    const XrVector3f head = head_position();
+    XrVector3f eyes;
+    XrPosef_TransformVector3f(&eyes, &camera_from_local, &head);
+    return eyes;
 }
 
 int tsfp_xr_held_matrices(XrVector3f body_offset, const float camera_correction[16], float rows[32])

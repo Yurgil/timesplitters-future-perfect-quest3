@@ -1,0 +1,40 @@
+--- a/src/d3d/d3d8_shaders.c
++++ b/src/d3d/d3d8_shaders.c
+@@ -187,6 +187,9 @@
+      * RHW = 0 is degenerate and titles do emit it for 2D overlays that do not
+      * care; dividing by it culls the whole quad, so leave those alone. */
+     "        if (input.pos.w != 0.0) o.pos /= input.pos.w;\n"
++#ifdef TSFP_OPENXR
++    TSFP_XR_SCREEN_TRANSFORM("o.pos")
++#endif
+     "        o.tex0 = input.tex0;\n"
+     "        o.tex1 = input.tex1;\n"
+     "        o.tex2 = input.tex2;\n"
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -1049,7 +1049,7 @@
+ static void v_buffer_destroy(RhiBuffer *b);
+ static void v_buffer_update(RhiBuffer *b, const void *data);
+ 
+-enum { XR_SCOPE_LAYER = 2, XR_SCOPE_LAYERS = 3, XR_SCOPE_MASK = 7, XR_CLIP_FLOATS = 48 };
++enum { XR_SCOPE_LAYER = 2, XR_SCOPE_LAYERS = 3, XR_SCOPE_MASK = 7, XR_CLIP_FLOATS = TSFP_XR_CLIP_FLOATS };
+ 
+ static _Thread_local int xr_allocating;
+ 
+@@ -4377,8 +4377,16 @@
+             float rows[XR_CLIP_FLOATS] = {0};
+             if (!tsfp_xr_turret_reticle_matrices(rows))
+                 return V.xr_identity_constants;
++            rows[TSFP_XR_SCREEN_PROJECTION] = 1.0f;
+             v_buffer_update(V.xr_turret_reticle_constants, rows);
+             V.xr_turret_reticle_uploaded = 1;
++#ifndef TSFP_RELEASE
++            static int reported;
++            if (!reported) {
++                fprintf(stderr, "[XR-TURRET] Projected the original reticle for both eyes\n");
++                reported = 1;
++            }
++#endif
+         }
+         return V.xr_turret_reticle_constants;
+     }

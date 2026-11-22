@@ -1,5 +1,6 @@
 #include "stereo_probe.h"
 #include "avatar_pose.h"
+#include "sniper_scope.h"
 #include "stereo_backend.h"
 #include "stereo_math.h"
 #include "uplink_math.h"
@@ -11,20 +12,20 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static int enabled;
 static _Thread_local unsigned camera_calls;
 static _Thread_local struct {
-    uint32_t body, header, arms, view_weapon[TSFP_AVATAR_HANDS], weapon_id[TSFP_AVATAR_HANDS], flash_weapon;
+    uint32_t body, header, player_entity, arms, view_weapon[TSFP_AVATAR_HANDS], weapon_id[TSFP_AVATAR_HANDS], flash_weapon;
     uint32_t shield[TSFP_AVATAR_HANDS];
-    const uint8_t *body_nodes, *active_header, *palette;
+    const uint8_t *body_nodes, *active_header;
     uint8_t *camera_palette;
     const void *world_projection, *active_projection;
     unsigned body_count, matrix_count, head, posed_hands, wrist_valid;
     int rig_supported, rig_sided, pose_prepared, palette_patched;
     XrVector3f body_offset, camera_room_offset;
     TsfpAvatarArm rig[TSFP_AVATAR_HANDS];
-    float outward_x[TSFP_AVATAR_HANDS];
     XrMatrix4x4f animated_hand[TSFP_AVATAR_HANDS];
     XrMatrix4x4f posed[TSFP_AVATAR_HANDS][TSFP_ARM_MATRICES];
     XrMatrix4x4f saved[TSFP_AVATAR_HANDS][TSFP_ARM_MATRICES];
@@ -71,7 +72,14 @@ static _Thread_local struct {
     const void *active_projection;
     float projection[16], particle_projection[16], map_projection[16];
     XrMatrix4x4f particle_move, map_move;
+    XrVector3f particle_body_offset;
 } weapon;
+static _Thread_local int uplink_map_source;
+static _Thread_local struct {
+    uint32_t id;
+    TsfpScopeGeometry geometry;
+    XrVector3f body_offset;
+} scope_lens;
 static _Thread_local struct {
     uint32_t caller;
     float projection[16], view[16], position[3];
@@ -100,6 +108,7 @@ void tsfp_stereo_probe_enable(int probe)
 void tsfp_stereo_begin_frame(void)
 {
     weapon.active_projection = NULL;
+    scope_lens.id = UINT32_MAX;
     ++kept.frame;
     memset(&avatar, 0, sizeof avatar);
     memset(&held, 0, sizeof held);
@@ -175,6 +184,7 @@ static void identify_viewmodels(const tsfp_guest_vm *vm, const uint8_t *player)
 {
     /* The guest first-person pass pairs actor+0xa4 with player+0x184
      * and actor+0x1d4 with player+0x55c. */
+    avatar.player_entity = player ? word(player + 0x14u) : 0;
     avatar.arms = player ? render_model(vm, word(player + 0xe84u)) : 0;
     avatar.view_weapon[TSFP_OFF_HAND_SLOT] = player ? render_model(vm, word(player + 0x1d8u)) : 0;
     avatar.view_weapon[TSFP_MAIN_HAND_SLOT] = player ? render_model(vm, word(player + 0x5b0u)) : 0;
@@ -214,6 +224,29 @@ int tsfp_stereo_world_projection(float out[16])
     if (!projection)
         return 0;
     memcpy(out, projection, 16 * sizeof(float));
+    return 1;
+}
+
+int tsfp_stereo_ghost_camera(TsfpGhostCamera *camera)
+{
+    tsfp_guest_vm vm;
+    xbox_GetGuestVirtualMemory(&vm);
+    const uint32_t address = guest_word(&vm, 0x007B0CC0u);
+    if (!address)
+        return 0;
+    const uint32_t offsets[TSFP_GHOST_CAMERA_MATRICES] = {
+        [TSFP_GHOST_CAMERA_VIEW] = 0x208u,
+        [TSFP_GHOST_CAMERA_PROJECTION] = 0x204u,
+        [TSFP_GHOST_CAMERA_VIEW_PROJECTION] = 0x20cu,
+    };
+    for (unsigned i = 0; i < TSFP_GHOST_CAMERA_MATRICES; ++i) {
+        camera->address[i] = guest_word(&vm, address + offsets[i]);
+        camera->matrix[i] = vm.resolve(vm.host, camera->address[i], sizeof camera->original[i], 1);
+        if (!camera->matrix[i])
+            return 0;
+        memcpy(camera->original[i], camera->matrix[i], sizeof camera->original[i]);
+    }
+    tsfp_xr_ghost_camera(camera->original[TSFP_GHOST_CAMERA_VIEW], camera->eyes);
     return 1;
 }
 
@@ -279,6 +312,16 @@ void tsfp_stereo_probe_weapon(uint32_t address)
         /* A spawn or weapon change can replace a viewmodel after the world pass. */
         const uint8_t *player = local_player(&vm, guest_word(&vm, 0x007B0C7Cu));
         identify_viewmodels(&vm, player);
+#ifndef TSFP_RELEASE
+        static unsigned mansion_samples;
+        if (player && guest_word(&vm, 0x0079094cu) == 1u && mansion_samples++ % 60u == 0) {
+            fprintf(stderr, "[M5] mode %x weapons %u/%u view %08x/%08x held %08x/%08x "
+                    "body %08x posed %u wrist %u world weapons %u\n",
+                    word(player + 0x114u), avatar.weapon_id[0], avatar.weapon_id[1],
+                    avatar.view_weapon[0], avatar.view_weapon[1], held.model[0], held.model[1],
+                    avatar.body, avatar.posed_hands, avatar.wrist_valid, held.drawn_slots);
+        }
+#endif
     }
 }
 
@@ -323,7 +366,7 @@ static int identify_body_rig(const tsfp_guest_vm *vm)
     }
     avatar.body_count = guest_word(vm, avatar.header);
     avatar.head = 0;
-    avatar.palette = NULL;
+    avatar.camera_palette = NULL;
     avatar.rig_supported = avatar.rig_sided = 0;
     avatar.pose_prepared = avatar.posed_hands = avatar.wrist_valid = 0;
     if (!avatar.body_count || avatar.body_count > TSFP_XBR_MAX_AVATAR_NODES)
@@ -428,8 +471,7 @@ static int avatar_world_pass(void)
 
 static void report_pose_failure(unsigned reason)
 {
-    static const char *const reasons[] = { "the arm rig is unsupported", "the model palette is missing",
-        "the camera palette is missing", "the palette basis is not rigid" };
+    static const char *const reasons[] = { "the arm rig is unsupported", "the camera palette is missing" };
     static unsigned reported;
     if (!(reported & (1u << reason))) {
         reported |= 1u << reason;
@@ -457,15 +499,10 @@ static void orient_body_rig(void)
         avatar.rig[TSFP_AVATAR_LEFT] = avatar.rig[TSFP_AVATAR_RIGHT];
         avatar.rig[TSFP_AVATAR_RIGHT] = arm;
     }
-    const float model_left = palette_position(avatar.palette, avatar.rig[TSFP_AVATAR_LEFT].matrix[TSFP_ARM_UPPER]).x;
-    const float model_right = palette_position(avatar.palette, avatar.rig[TSFP_AVATAR_RIGHT].matrix[TSFP_ARM_UPPER]).x;
-    avatar.outward_x[TSFP_AVATAR_RIGHT] = model_right > model_left ? 1.0f : -1.0f;
-    avatar.outward_x[TSFP_AVATAR_LEFT] = -avatar.outward_x[TSFP_AVATAR_RIGHT];
     static int reported = -1;
     if (reported != swap) {
         reported = swap;
-        fprintf(stderr, "[6DoF] Character arms %s node order, right shoulder on model %cX\n",
-                swap ? "swapped from" : "match", avatar.outward_x[TSFP_AVATAR_RIGHT] > 0 ? '+' : '-');
+        fprintf(stderr, "[6DoF] Character arms %s node order\n", swap ? "swapped from" : "match");
     }
 }
 
@@ -505,13 +542,25 @@ static XrMatrix4x4f linear_part(const XrMatrix4x4f *matrix)
 
 static const char *const hand_names[TSFP_AVATAR_HANDS] = { "left", "right" };
 
+static void save_hand_holds(void);
+
 static void load_hand_holds(void)
 {
     kept.hand_holds_loaded = 1;
+    for (unsigned hand = 0; hand < TSFP_AVATAR_HANDS; ++hand)
+        kept.hand_hold[hand] = tsfp_avatar_default_hand_hold(hand);
+    kept.hand_hold_valid = (1u << TSFP_AVATAR_HANDS) - 1u;
     const char *path = tsfp_xr_hand_calibration_file();
     FILE *file = path && *path ? fopen(path, "r") : NULL;
+    int legacy = 0;
+    if (!file) {
+        legacy = 1;
+        path = tsfp_xr_legacy_hand_calibration_file();
+        file = path && *path ? fopen(path, "r") : NULL;
+    }
     if (!file)
         return;
+    unsigned loaded = 0;
     char name[8];
     float m[9];
     while (fscanf(file, "%7s %f %f %f %f %f %f %f %f %f", name,
@@ -519,16 +568,24 @@ static void load_hand_holds(void)
         for (unsigned hand = 0; hand < TSFP_AVATAR_HANDS; ++hand) {
             if (strcmp(name, hand_names[hand]) != 0)
                 continue;
-            XrMatrix4x4f *hold = &kept.hand_hold[hand];
-            XrMatrix4x4f_CreateIdentity(hold);
+            XrMatrix4x4f hold;
+            XrMatrix4x4f_CreateIdentity(&hold);
             for (unsigned column = 0; column < 3; ++column)
-                memcpy(&hold->m[column * 4], &m[column * 3], 3 * sizeof(float));
-            kept.hand_hold_valid |= 1u << hand;
+                memcpy(&hold.m[column * 4], &m[column * 3], 3 * sizeof(float));
+            int finite = 1;
+            for (unsigned i = 0; i < 16; ++i)
+                finite &= isfinite(hold.m[i]);
+            if (finite && XrMatrix4x4f_IsRigidBody(&hold, 0.01f)) {
+                kept.hand_hold[hand] = hold;
+                loaded |= 1u << hand;
+            }
         }
     }
     fclose(file);
     fprintf(stderr, "[6DoF] Loaded hand calibration (left %d, right %d)\n",
-            !!(kept.hand_hold_valid & 1u), !!(kept.hand_hold_valid & 2u));
+            !!(loaded & 1u), !!(loaded & 2u));
+    if (legacy && loaded)
+        save_hand_holds();
 }
 
 /* The player turns Touch until a hand looks right. That look becomes the
@@ -541,8 +598,19 @@ static void calibrate_hand_holds(void)
         kept.hand_hold[hand] = linear_part(&avatar.posed[hand][TSFP_ARM_HAND]);
         kept.hand_hold_valid |= 1u << hand;
     }
+    save_hand_holds();
+}
+
+static void save_hand_holds(void)
+{
     const char *path = tsfp_xr_hand_calibration_file();
-    FILE *file = path && *path ? fopen(path, "w") : NULL;
+    char temporary[4096];
+    if (!path || !*path || snprintf(temporary, sizeof temporary, "%s.tmp", path) >= (int)sizeof temporary)
+        return;
+    FILE *file = fopen(temporary, "w");
+    if (!file)
+        return;
+    int written = 1;
     for (unsigned hand = 0; hand < TSFP_AVATAR_HANDS; ++hand) {
         if (!(kept.hand_hold_valid & (1u << hand)))
             continue;
@@ -550,12 +618,12 @@ static void calibrate_hand_holds(void)
         char line[256];
         snprintf(line, sizeof line, "%s %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f\n", hand_names[hand],
                  m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
-        if (file)
-            fputs(line, file);
+        written &= fputs(line, file) >= 0;
         fprintf(stderr, "[6DoF] Hand calibration %s", line);
     }
-    if (file)
-        fclose(file);
+    written &= fclose(file) == 0;
+    if (!written || rename(temporary, path) != 0)
+        unlink(temporary);
 }
 
 static void move_held_weapon(unsigned hand, unsigned source_hand)
@@ -583,18 +651,13 @@ static void prepare_avatar_pose(uint32_t view)
 
     tsfp_guest_vm vm;
     xbox_GetGuestVirtualMemory(&vm);
-    avatar.palette = vm.resolve(vm.host, guest_word(&vm, avatar.body + 0x10u),
-                                avatar.matrix_count * sizeof(XrMatrix4x4f), 0);
-    if (!avatar.palette) {
-        report_pose_failure(1);
-        return;
-    }
     /* sub_A1B80 builds the view's composed palette before sub_18EA90
      * draws the first node. The renderer reads this cache, not model+0x10. */
     const uint32_t cache = guest_word(&vm, avatar.body + 0x20u + view * 4u);
-    avatar.camera_palette = vm.resolve(vm.host, cache, avatar.matrix_count * sizeof(XrMatrix4x4f), 1);
-    if (!avatar.camera_palette || avatar.camera_palette == avatar.palette) {
-        report_pose_failure(2);
+    avatar.camera_palette = cache && cache != guest_word(&vm, avatar.body + 0x10u) ?
+        vm.resolve(vm.host, cache, avatar.matrix_count * sizeof(XrMatrix4x4f), 1) : NULL;
+    if (!avatar.camera_palette) {
+        report_pose_failure(1);
         return;
     }
     if (!avatar.rig_sided) {
@@ -602,35 +665,14 @@ static void prepare_avatar_pose(uint32_t view)
         avatar.rig_sided = 1;
     }
 
-    const unsigned shoulder = avatar.rig[TSFP_AVATAR_RIGHT].matrix[TSFP_ARM_UPPER];
-    XrMatrix4x4f model_shoulder, camera_shoulder, camera_from_body;
-    memcpy(&model_shoulder, avatar.palette + shoulder * sizeof model_shoulder, sizeof model_shoulder);
-    memcpy(&camera_shoulder, avatar.camera_palette + shoulder * sizeof camera_shoulder, sizeof camera_shoulder);
-    if (!tsfp_avatar_palette_basis(&camera_from_body, &model_shoulder, &camera_shoulder)) {
-        report_pose_failure(3);
-        return;
-    }
-    static int reported_origin;
-    if (!reported_origin) {
-        reported_origin = 1;
-        const XrVector3f root = tsfp_matrix_position(&camera_from_body);
-        fprintf(stderr, "[6DoF] Body origin in game camera space %.3f %.3f %.3f\n",
-                root.x, root.y, root.z);
-    }
-
+    /* The draw palette already includes the game's per-view transforms. Use
+     * the same coordinate space as the vertices and the body eye matrices. */
     push_body_back(&anchor);
-    XrMatrix4x4f local_from_camera, local_from_body, body_from_local;
     XrVector3f_Add(&anchor.position, &anchor.position, &avatar.body_offset);
-    XrMatrix4x4f_CreateFromRigidTransform(&local_from_camera, &anchor);
-    XrMatrix4x4f_Multiply(&local_from_body, &local_from_camera, &camera_from_body);
-    XrMatrix4x4f_InvertRigidBody(&body_from_local, &local_from_body);
-    XrQuaternionf camera_from_local;
-    XrQuaternionf_Invert(&camera_from_local, &anchor.orientation);
-    XrQuaternionf_RotateVector3f(&avatar.camera_room_offset, &camera_from_local, &avatar.body_offset);
+    XrPosef camera_from_local;
+    XrPosef_Invert(&camera_from_local, &anchor);
+    XrQuaternionf_RotateVector3f(&avatar.camera_room_offset, &camera_from_local.orientation, &avatar.body_offset);
     const uint32_t entity = guest_word(&vm, avatar.body);
-    const XrMatrix4x4f camera_from_body_linear = linear_part(&camera_from_body);
-    XrMatrix4x4f body_from_camera_linear;
-    XrMatrix4x4f_InvertRigidBody(&body_from_camera_linear, &camera_from_body_linear);
     if (!kept.hand_holds_loaded)
         load_hand_holds();
 
@@ -639,47 +681,32 @@ static void prepare_avatar_pose(uint32_t view)
         XrMatrix4x4f *bones = avatar.posed[hand];
         for (unsigned i = 0; i < TSFP_ARM_MATRICES; ++i) {
             const unsigned matrix = tsfp_avatar_pose_matrix(&avatar.rig[hand], i);
-            memcpy(&bones[i], avatar.palette + matrix * sizeof bones[i], sizeof bones[i]);
+            memcpy(&bones[i], avatar.camera_palette + matrix * sizeof bones[i], sizeof bones[i]);
         }
-        memcpy(&avatar.animated_hand[hand],
-               avatar.camera_palette + avatar.rig[hand].matrix[TSFP_ARM_HAND] * sizeof(XrMatrix4x4f),
-               sizeof(XrMatrix4x4f));
+        avatar.animated_hand[hand] = bones[TSFP_ARM_HAND];
         avatar.wrist_orientation[hand] = anchor.orientation;
         if (tracked & bit) {
             XrQuaternionf aim_from_camera;
-            XrQuaternionf_Multiply(&aim_from_camera, &hands[hand].orientation, &camera_from_local);
+            XrQuaternionf_Multiply(&aim_from_camera, &hands[hand].orientation, &camera_from_local.orientation);
             avatar.camera_aim[hand] = aim_from_camera;
             XrMatrix4x4f aim;
             XrMatrix4x4f_CreateFromQuaternion(&aim, &aim_from_camera);
-            /* An uncalibrated hand keeps its animated look for Touch held
-             * straight ahead. */
+            /* Default and custom holds use the same camera-space basis. */
             const XrMatrix4x4f animated = linear_part(&bones[TSFP_ARM_HAND]);
-            XrMatrix4x4f hold, hand_camera, hand_body, animated_inverse, wrist_rotation;
-            if (kept.hand_hold_valid & bit)
-                hold = kept.hand_hold[hand];
-            else
-                XrMatrix4x4f_Multiply(&hold, &camera_from_body_linear, &animated);
-            XrMatrix4x4f_Multiply(&hand_camera, &aim, &hold);
-            XrMatrix4x4f_Multiply(&hand_body, &body_from_camera_linear, &hand_camera);
-            XrMatrix4x4f_Invert(&animated_inverse, &animated);
-            XrMatrix4x4f_Multiply(&wrist_rotation, &hand_body, &animated_inverse);
+            const XrMatrix4x4f wrist_rotation = tsfp_avatar_hand_rotation(&kept.hand_hold[hand], &aim, &animated);
             XrVector3f target;
-            XrMatrix4x4f_TransformVector3f(&target, &body_from_local, &hands[hand].position);
-            if (tsfp_avatar_pose_arm(bones, avatar.outward_x[hand], target, &wrist_rotation)) {
+            XrPosef_TransformVector3f(&target, &camera_from_local, &hands[hand].position);
+            const float outward = hand == TSFP_AVATAR_LEFT ? -1.0f : 1.0f;
+            if (tsfp_avatar_pose_arm(bones, outward, target, &wrist_rotation)) {
                 avatar.posed_hands |= bit;
                 avatar.wrist_orientation[hand] = hands[hand].orientation;
             }
         }
         const XrVector3f wrist = tsfp_matrix_position(&bones[TSFP_ARM_WRIST_JOINT]);
-        XrMatrix4x4f_TransformVector3f(&avatar.wrist[hand], &local_from_body, &wrist);
+        XrPosef_TransformVector3f(&avatar.wrist[hand], &anchor, &wrist);
         if (isfinite(avatar.wrist[hand].x) && isfinite(avatar.wrist[hand].y) && isfinite(avatar.wrist[hand].z))
             avatar.wrist_valid |= bit;
         if (avatar.posed_hands & bit) {
-            for (unsigned i = 0; i < TSFP_ARM_MATRICES; ++i) {
-                XrMatrix4x4f posed;
-                XrMatrix4x4f_Multiply(&posed, &camera_from_body, &bones[i]);
-                bones[i] = posed;
-            }
             move_held_weapon(hand, hand);
             kept.hand_move_entity[hand] = entity;
         }
@@ -783,21 +810,53 @@ static XrVector3f posed_wrist(unsigned hand)
     return tsfp_matrix_position(&avatar.posed[hand][TSFP_ARM_WRIST_JOINT]);
 }
 
-static int weapon_target(uint32_t id, unsigned hand, XrMatrix4x4f *target)
+static int story_weapon_scene(const tsfp_guest_vm *vm)
 {
+    /* The active game type used by the PC adapter for Story and Story Co-op. */
+    const uint32_t mode = guest_word(vm, 0x0078AD20u);
+    return mode == 4u || mode == 14u ? (int)guest_word(vm, 0x0079094Cu) : TSFP_WEAPON_NO_STORY;
+}
+
+static int tracked_weapon_target(uint32_t id, unsigned hand, int story_scene, XrMatrix4x4f *target)
+{
+    XrPosef anchor, hands[TSFP_AVATAR_HANDS], camera_from_local;
+    XrVector3f room, wrist;
+    XrQuaternionf aim;
+    if (!(tsfp_xr_avatar_poses(&anchor, &room, hands) & (1u << hand)))
+        return 0;
+    XrPosef_Invert(&camera_from_local, &anchor);
+    XrPosef_TransformVector3f(&wrist, &camera_from_local, &hands[hand].position);
+    XrQuaternionf_Multiply(&aim, &hands[hand].orientation, &camera_from_local.orientation);
+    return tsfp_weapon_target(id, hand, story_scene, wrist, aim, target);
+}
+
+static int weapon_target(const tsfp_guest_vm *vm, uint32_t id, unsigned hand,
+                         XrMatrix4x4f *target, XrVector3f *body_offset)
+{
+    const TsfpWeaponProfile *profile = tsfp_weapon_profile(id);
+    if (!profile)
+        return 0;
+    const int story_scene = story_weapon_scene(vm);
+    const unsigned bit = 1u << hand;
+    *body_offset = avatar.body_offset;
+    if (!(avatar.posed_hands & avatar.wrist_valid & bit)) {
+        /* A guest cull or invalid body palette can leave only the viewmodel.
+         * Mount it by the same profile in the unshifted game camera space. */
+        *body_offset = (XrVector3f){0};
+        return profile->mount != TSFP_WEAPON_CUFF && tracked_weapon_target(id, hand, story_scene, target);
+    }
     if (id == TSFP_WEAPON_KRUGER && (held.pistol_poses & (1u << hand))) {
         tsfp_kruger_target(&held.pistol_root[hand], target);
         return 1;
     }
-    const TsfpWeaponProfile *profile = tsfp_weapon_profile(id);
     const XrVector3f wrist = posed_wrist(hand);
     if (profile->mount == TSFP_WEAPON_CUFF)
         return tsfp_weapon_cuff_target(profile, wrist, &avatar.posed[hand][TSFP_ARM_FOREARM], hand, target);
-    return tsfp_weapon_target(id, hand, wrist, avatar.camera_aim[hand], target);
+    return tsfp_weapon_target(id, hand, story_scene, wrist, avatar.camera_aim[hand], target);
 }
 
 static int weapon_mount(const tsfp_guest_vm *vm, unsigned slot, unsigned hand,
-                        XrMatrix4x4f *camera_move, XrMatrix4x4f *mounted_pose)
+                        XrMatrix4x4f *camera_move, XrMatrix4x4f *mounted_pose, XrVector3f *body_offset)
 {
     const uint32_t id = avatar.weapon_id[slot];
     const TsfpWeaponProfile *profile = tsfp_weapon_profile(id);
@@ -822,24 +881,35 @@ static int weapon_mount(const tsfp_guest_vm *vm, unsigned slot, unsigned hand,
         return 0;
 
     XrMatrix4x4f target, source;
-    if (!weapon_target(id, hand, &target))
+    XrVector3f offset;
+    if (!weapon_target(vm, id, hand, &target, &offset))
         return 0;
     memcpy(&source, housing, sizeof source);
     if (!tsfp_weapon_correction(&source, &target, camera_move))
         return 0;
     if (mounted_pose)
         *mounted_pose = target;
+    if (body_offset)
+        *body_offset = offset;
 
     kept.particle_weapons[slot].instance = instance;
     kept.particle_weapons[slot].source = source;
     if (profile->mount == TSFP_WEAPON_GUN) {
         XrVector3f muzzle, direction;
         tsfp_weapon_bore(profile, &target, &muzzle, &direction);
-        XrVector3f_Add(&kept.shots[slot].muzzle, &muzzle, &avatar.camera_room_offset);
+        if (avatar.posed_hands & avatar.wrist_valid & (1u << hand))
+            XrVector3f_Add(&muzzle, &muzzle, &avatar.camera_room_offset);
+        kept.shots[slot].muzzle = muzzle;
         kept.shots[slot].direction = direction;
         kept.shots[slot].weapon = id;
-        kept.shots[slot].entity = kept.hand_move_entity[hand];
+        kept.shots[slot].entity = avatar.player_entity;
         kept.shots[slot].frame = kept.frame;
+        const TsfpScopeProfile *scope = tsfp_scope_profile(id);
+        if (scope) {
+            scope_lens.geometry = tsfp_scope_geometry(id, scope, story_weapon_scene(vm), &target);
+            scope_lens.body_offset = offset;
+            scope_lens.id = id;
+        }
     } else if (id == TSFP_UPLINK) {
         locate_uplink_emitters(vm, cache, matrices, hand, posed_wrist(hand), camera_move);
     }
@@ -856,20 +926,17 @@ static int weapon_mount(const tsfp_guest_vm *vm, unsigned slot, unsigned hand,
 int tsfp_stereo_weapon_attachment(TsfpModelRole role, XrVector3f *body_offset, XrMatrix4x4f *camera_move)
 {
     const unsigned hand = role == TSFP_MODEL_LEFT_WEAPON ? TSFP_AVATAR_LEFT : TSFP_AVATAR_RIGHT;
-    if (!(avatar.posed_hands & (1u << hand)))
-        return 0;
     tsfp_guest_vm vm;
     xbox_GetGuestVirtualMemory(&vm);
     const unsigned slot = kept.slot_hand[TSFP_MAIN_HAND_SLOT] == hand && avatar.view_weapon[TSFP_MAIN_HAND_SLOT] &&
         avatar.weapon_id[TSFP_MAIN_HAND_SLOT] != UINT32_MAX ? TSFP_MAIN_HAND_SLOT : TSFP_OFF_HAND_SLOT;
-    if (weapon_mount(&vm, slot, hand, camera_move, NULL)) {
+    if (weapon_mount(&vm, slot, hand, camera_move, NULL, body_offset)) {
         for (unsigned i = 0; i < 16; ++i)
             if (!isfinite(camera_move->m[i]))
                 return 0;
-        *body_offset = avatar.body_offset;
         return 1;
     }
-    if (!view_arms_supported(&vm))
+    if (!(avatar.posed_hands & (1u << hand)) || !view_arms_supported(&vm))
         return 0;
     const uint32_t cache = guest_word(&vm, avatar.arms + 0x20u);
     const uint8_t *palette = cache ? vm.resolve(vm.host, cache, 15 * sizeof(XrMatrix4x4f), 0) : NULL;
@@ -926,7 +993,7 @@ int tsfp_stereo_weapon_pose(TsfpModelRole role, XrPosef *pose)
     XrPosef anchor, hands[TSFP_AVATAR_HANDS];
     XrVector3f body_offset;
     const unsigned tracked = tsfp_xr_avatar_poses(&anchor, &body_offset, hands);
-    const int from_body = (avatar.wrist_valid & bit) != 0;
+    const int from_body = ((tracked & bit) ? avatar.posed_hands & avatar.wrist_valid : avatar.wrist_valid) & bit;
     if (!from_body && !(tracked & bit))
         return 0;
     const XrVector3f wrist = from_body ? avatar.wrist[hand] : hands[hand].position;
@@ -962,6 +1029,50 @@ static const uint8_t *first_person_player(const tsfp_guest_vm *vm)
 {
     const uint8_t *player = local_player(vm, guest_word(vm, 0x007B0C7Cu));
     return player && word(player + 0x114u) == 2 ? player : NULL;
+}
+
+uint32_t tsfp_stereo_scope_weapon(unsigned *hand)
+{
+    tsfp_guest_vm vm;
+    xbox_GetGuestVirtualMemory(&vm);
+    const uint8_t *player = first_person_player(&vm);
+    if (!player)
+        return UINT32_MAX;
+    const uint32_t main = word(player + TSFP_PLAYER_MAIN_HAND + 0x30u);
+    for (int slot = TSFP_MAIN_HAND_SLOT; slot >= TSFP_OFF_HAND_SLOT; --slot) {
+        const uint8_t *state = player + player_hand_state[slot];
+        const uint32_t id = word(state + 0x30u);
+        if (tsfp_scope_profile(id) && render_model(&vm, word(state + 0x54u))) {
+            *hand = tsfp_weapon_hand(slot, main != UINT32_MAX && word(player + 0x5b0u));
+            return id;
+        }
+    }
+    return UINT32_MAX;
+}
+
+int tsfp_stereo_scope_camera(uint32_t id, TsfpScopeGeometry *scope)
+{
+    unsigned hand;
+    if (id == UINT32_MAX || tsfp_stereo_scope_weapon(&hand) != id || !tsfp_xr_touch_tracked(hand))
+        return 0;
+    const TsfpScopeProfile *profile = tsfp_scope_profile(id);
+    XrMatrix4x4f target;
+    tsfp_guest_vm vm;
+    xbox_GetGuestVirtualMemory(&vm);
+    const int story_scene = story_weapon_scene(&vm);
+    if (!profile || !tracked_weapon_target(id, hand, story_scene, &target))
+        return 0;
+    *scope = tsfp_scope_geometry(id, profile, story_scene, &target);
+    return 1;
+}
+
+int tsfp_stereo_scope_lens(uint32_t id, TsfpScopeGeometry *scope, XrVector3f *body_offset)
+{
+    if (id == UINT32_MAX || scope_lens.id != id)
+        return 0;
+    *scope = scope_lens.geometry;
+    *body_offset = scope_lens.body_offset;
+    return 1;
 }
 
 int tsfp_stereo_immersive_player(void)
@@ -1029,7 +1140,7 @@ int tsfp_stereo_weapon_effect_attachment(TsfpModelRole role, XrVector3f *body_of
         return 1;
     }
     if (role == TSFP_MODEL_LEFT_WEAPON_PARTICLES || role == TSFP_MODEL_RIGHT_WEAPON_PARTICLES) {
-        *body_offset = avatar.body_offset;
+        *body_offset = weapon.particle_body_offset;
         *camera_move = weapon.particle_move;
         return 1;
     }
@@ -1040,18 +1151,27 @@ int tsfp_stereo_weapon_effect_attachment(TsfpModelRole role, XrVector3f *body_of
     xbox_GetGuestVirtualMemory(&vm);
     const uint8_t *palette = model_camera_palette(&vm, avatar.shield[slot], 0);
     XrMatrix4x4f source, target;
-    if (!palette || !weapon_target(TSFP_WEAPON_FUTURE_SNIPER, hand, &target))
+    if (!palette || !weapon_target(&vm, TSFP_WEAPON_FUTURE_SNIPER, hand, &target, body_offset))
         return 0;
     /* FSNIPER_SHIELD is authored in the rifle's coordinates. Its two
      * identity bones are composed into the camera palette by A1B80. */
     memcpy(&source, palette, sizeof source);
     if (!tsfp_weapon_correction(&source, &target, camera_move))
         return 0;
-    *body_offset = avatar.body_offset;
     return 1;
 }
 
-int tsfp_stereo_prepare_uplink_map(uint32_t state)
+void tsfp_stereo_set_uplink_map_source(int draw)
+{
+    uplink_map_source = draw;
+}
+
+int tsfp_stereo_uplink_map_source(void)
+{
+    return uplink_map_source;
+}
+
+int tsfp_stereo_prepare_uplink_map(uint32_t state, uint32_t plane, uint32_t apex)
 {
     if (!avatar.posed_hands || !tsfp_xr_world_active())
         return 0;
@@ -1070,12 +1190,24 @@ int tsfp_stereo_prepare_uplink_map(uint32_t state)
             (avatar.posed_hands & avatar.wrist_valid & (1u << hand))) {
             /* 34CAA0 emits its textured quads in the same view space as the cuff. */
             XrMatrix4x4f cuff_move, cuff_pose;
-            if (!weapon_mount(&vm, slot, hand, &cuff_move, &cuff_pose))
+            if (!weapon_mount(&vm, slot, hand, &cuff_move, &cuff_pose, NULL))
                 return 0;
             XrVector3f pivot;
             XrMatrix4x4f_TransformVector3f(&pivot, &cuff_pose, &tsfp_weapon_profile(id)->grip);
             const XrVector3f elbow = tsfp_matrix_position(&avatar.posed[hand][TSFP_ARM_FOREARM]);
             tsfp_uplink_rotate_map(&cuff_move, pivot, elbow, posed_wrist(hand), &weapon.map_move);
+            /* 34CAA0 transforms its map corners from local XY with the
+             * second argument. The third argument is the cone tip in view space. */
+            const void *plane_data = vm.resolve(vm.host, plane, sizeof(XrMatrix4x4f), 0);
+            const void *apex_data = vm.resolve(vm.host, apex, sizeof(XrVector3f), 0);
+            if (plane_data && apex_data) {
+                XrMatrix4x4f plane_pose;
+                XrVector3f tip;
+                memcpy(&plane_pose, plane_data, sizeof plane_pose);
+                memcpy(&tip, apex_data, sizeof tip);
+                tsfp_uplink_face_map(&weapon.map_move, &plane_pose, tip,
+                                     tsfp_xr_body_eye_position(avatar.body_offset));
+            }
             static int reported;
             if (!reported) {
                 reported = 1;
@@ -1089,7 +1221,7 @@ int tsfp_stereo_prepare_uplink_map(uint32_t state)
 
 TsfpModelRole tsfp_stereo_weapon_particles(uint32_t emitter)
 {
-    if (!avatar.posed_hands || !tsfp_xr_world_active())
+    if (!tsfp_xr_world_active())
         return TSFP_MODEL_DEFAULT;
     tsfp_guest_vm vm;
     xbox_GetGuestVirtualMemory(&vm);
@@ -1121,9 +1253,8 @@ TsfpModelRole tsfp_stereo_weapon_particles(uint32_t emitter)
         /* At 1C0CB0, 000DFEC0 spawns the burst from the camera-space
          * copy of the redirected shot origin, including room offset. */
         for (unsigned slot = 0; slot < TSFP_AVATAR_HANDS; ++slot) {
-            const unsigned hand = kept.slot_hand[slot];
             const uint32_t id = word(player + player_hand_state[slot] + 0x30u);
-            if (!(avatar.posed_hands & (1u << hand)) || !current_weapon_bore(slot, entity, id))
+            if (!current_weapon_bore(slot, entity, id))
                 continue;
             const void *projection = vm.resolve(vm.host, 0x0055FA40u, sizeof weapon.particle_projection, 0);
             if (!projection)
@@ -1138,7 +1269,7 @@ TsfpModelRole tsfp_stereo_weapon_particles(uint32_t emitter)
         const unsigned state = player_hand_state[slot];
         const uint32_t id = word(player + state + 0x30u);
         const int shield_active = id == TSFP_WEAPON_FUTURE_SNIPER && word(player + state + 0x38u) == 1u;
-        if (id == UINT32_MAX || !(avatar.posed_hands & (1u << hand)) || !current_weapon_bore(slot, entity, id))
+        if (id == UINT32_MAX || !current_weapon_bore(slot, entity, id))
             continue;
         const void *source = NULL;
         if (in_camera && owner == word(player + state + 0x54u)) {
@@ -1162,10 +1293,11 @@ TsfpModelRole tsfp_stereo_weapon_particles(uint32_t emitter)
             return TSFP_MODEL_DEFAULT;
         if (held_shield) {
             weapon.particle_move = held.correction[hand];
+            weapon.particle_body_offset = avatar.body_offset;
         } else {
             XrMatrix4x4f target, original;
             memcpy(&original, source, sizeof original);
-            if (!weapon_target(id, hand, &target) ||
+            if (!weapon_target(&vm, id, hand, &target, &weapon.particle_body_offset) ||
                 !tsfp_weapon_correction(&original, &target, &weapon.particle_move))
                 return TSFP_MODEL_DEFAULT;
         }
@@ -1522,9 +1654,8 @@ void tsfp_stereo_redirect_projectile(uint32_t stack, uint32_t hand_record)
     const unsigned hand = kept.slot_hand[slot];
     const uint32_t weapon_id = guest_word(&vm, weapon_record + 0x30u);
     const int mounted = current_weapon_bore((unsigned)slot, entity, weapon_id);
-    if (kept.hand_move_entity[hand] != entity ||
-        kept.frame - kept.hand_move_frame[hand] > TSFP_SHOT_POSE_FRAMES ||
-        !tsfp_xr_touch_tracked(hand)) {
+    if (!tsfp_xr_touch_tracked(hand) || (!mounted &&
+        (kept.hand_move_entity[hand] != entity || kept.frame - kept.hand_move_frame[hand] > TSFP_SHOT_POSE_FRAMES))) {
         static unsigned reported;
         if (reported++ < 4u)
             fprintf(stderr, "[6DoF] Projectile has no current pose for the %s hand\n", hand_names[hand]);
@@ -1582,6 +1713,15 @@ void tsfp_stereo_redirect_projectile(uint32_t stack, uint32_t hand_record)
         memcpy(vectors[i], &values[i], sizeof values[i]);
 
     static unsigned reported;
+#ifndef TSFP_RELEASE
+    static uint32_t scene, last_weapon;
+    const uint32_t current_scene = guest_word(&vm, 0x0079094cu);
+    if (current_scene != scene || weapon_id != last_weapon) {
+        scene = current_scene;
+        last_weapon = weapon_id;
+        reported = 0;
+    }
+#endif
     if (reported < 12u) {
         ++reported;
         fprintf(stderr, "[6DoF] Projectile from %s hand: muzzle %.3f %.3f %.3f, ray %.3f %.3f %.3f\n",
@@ -1659,7 +1799,9 @@ static unsigned animated_weapon_hand(const uint8_t *palette, unsigned fallback)
 }
 
 static _Thread_local unsigned model_depth, overlay_depth, first_person_weapon_depth;
+static _Thread_local int turret_reticle_draw;
 static _Thread_local int screen_effects;
+static _Thread_local TsfpScreenOverlay screen_overlay;
 
 /* 14FF20 draws the per-view HUD. Screen effects run outside this scope. */
 void tsfp_stereo_overlay(int begin)
@@ -1675,6 +1817,16 @@ int tsfp_stereo_hud_draw(void)
     return overlay_depth != 0;
 }
 
+void tsfp_stereo_turret_reticle(int draw)
+{
+    turret_reticle_draw = draw;
+}
+
+int tsfp_stereo_turret_reticle_draw(void)
+{
+    return turret_reticle_draw;
+}
+
 void tsfp_stereo_screen_effects(int routine)
 {
     screen_effects = routine;
@@ -1683,6 +1835,18 @@ void tsfp_stereo_screen_effects(int routine)
 int tsfp_stereo_screen_effect_draw(void)
 {
     return screen_effects;
+}
+
+TsfpScreenOverlay tsfp_stereo_set_screen_overlay(TsfpScreenOverlay draw)
+{
+    const TsfpScreenOverlay previous = screen_overlay;
+    screen_overlay = draw;
+    return previous;
+}
+
+TsfpScreenOverlay tsfp_stereo_screen_overlay_draw(void)
+{
+    return screen_overlay;
 }
 
 void tsfp_stereo_first_person_weapon_pass(int begin)
@@ -1757,9 +1921,12 @@ int tsfp_stereo_model_begin(uint32_t instance, uint32_t node, uint32_t view)
         xbox_GetGuestVirtualMemory(&vm);
         const uint8_t *palette = model_camera_palette(&vm, instance, view);
         move_held_weapon(hand, animated_weapon_hand(palette, hand));
-        if (avatar.view_weapon[slot] && (avatar.posed_hands & avatar.wrist_valid & (1u << hand)) &&
-            (tsfp_weapon_profile(avatar.weapon_id[slot]) || view_arms_supported(&vm))) {
-            if (avatar.weapon_id[slot] == TSFP_WEAPON_KRUGER && palette && !(held.pistol_poses & (1u << hand))) {
+        const int wrist_matches = (avatar.posed_hands & avatar.wrist_valid & (1u << hand)) != 0;
+        if (avatar.view_weapon[slot] &&
+            (wrist_matches ? tsfp_weapon_profile(avatar.weapon_id[slot]) || view_arms_supported(&vm) :
+                             tsfp_xr_touch_tracked(hand))) {
+            if (wrist_matches && avatar.weapon_id[slot] == TSFP_WEAPON_KRUGER && palette &&
+                !(held.pistol_poses & (1u << hand))) {
                 XrMatrix4x4f root;
                 memcpy(&root, palette, sizeof root);
                 XrMatrix4x4f_Multiply(&held.pistol_root[hand], &held.correction[hand], &root);
@@ -1821,6 +1988,16 @@ static const uint8_t *entity_from_handle(const tsfp_guest_vm *vm, uint32_t handl
     return entity && word(entity + 0x2cu) == handle ? entity : NULL;
 }
 
+enum { TSFP_CAMERA_VEHICLE = 0x400u };
+
+int tsfp_stereo_in_vehicle(void)
+{
+    tsfp_guest_vm vm;
+    xbox_GetGuestVirtualMemory(&vm);
+    const uint8_t *player = local_player(&vm, guest_word(&vm, 0x007B0C7Cu));
+    return player && word(player + 0x114u) == TSFP_CAMERA_VEHICLE;
+}
+
 int tsfp_stereo_mounted_gun(void)
 {
     tsfp_guest_vm vm;
@@ -1829,9 +2006,9 @@ int tsfp_stereo_mounted_gun(void)
     if (!player)
         return 0;
     const uint32_t mode = word(player + 0x114u);
-    if (mode == 0x80u)
-        return 1; /* stationary and remotely controlled turrets */
-    if (mode != 0x400u)
+    if (tsfp_turret_camera_mode(mode))
+        return 1;
+    if (mode != TSFP_CAMERA_VEHICLE)
         return 0;
 
     /* The vehicle camera mode also covers drivers and passengers. Check

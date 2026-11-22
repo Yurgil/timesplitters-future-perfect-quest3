@@ -61,6 +61,7 @@ if(TSFP_BUILD_RUNTIME)
         "${CMAKE_CURRENT_SOURCE_DIR}/shaderc_vulkan.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/projection_probe.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/stereo_probe.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/sniper_scope_render.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/uplink_render.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/xr.c")
     target_include_directories(xbox_d3d8 PRIVATE

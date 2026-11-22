@@ -16,21 +16,51 @@ XMV videos are skipped. Some effects and later missions still need checks on the
 If a Quest APK is available under [GitHub Releases](https://github.com/Yurgil/timesplitters-future-perfect-quest3/releases), download `timesplitters-quest3-release.apk`. You can also [build the release profile locally](docs/build.md).
 
 1. Enable Developer Mode on your Quest 3, connect it over USB and accept the USB debugging prompt. Install Android Platform Tools and run `adb devices` to check the connection. [Meta's sideloading guide](https://developers.meta.com/vr/essentials/quick-start/)
-2. Prepare your own extracted **US Xbox** copy, title ID `45410066`, with `default.xbe`, `pak/` and `xmv/` at the top level. If you have an ISO, see [disc import](docs/build.md#prepare-the-game-dump). Verify the dump, install the APK and launch **TimeSplitters Quest** once to initialize storage. Close the app before transferring the game.
+2. Install the APK and open **TimeSplitters Quest** once to initialize storage. Use your own supported **US Xbox** copy, title ID `45410066`.
 
    ```sh
-   GAME_DIR="/path/to/extracted/game"
-   python3 tools/check_game_dump.py "$GAME_DIR"
    adb install -r timesplitters-quest3-release.apk
    ```
 
-3. Copy the game files to the headset and open **TimeSplitters Quest** under **Unknown Sources**. For a first check, choose `Story → 2401 — Time to Split → Normal`.
+3. Choose either an ISO or an already extracted game folder using the instructions below.
 
-   ```sh
-   QUEST_GAME=/sdcard/Android/data/org.tsfp.quest/files/game
-   adb shell mkdir -p "$QUEST_GAME"
-   adb push "$GAME_DIR/default.xbe" "$GAME_DIR/pak" "$GAME_DIR/xmv" "$QUEST_GAME/"
-   ```
+### Option 1 — Import an ISO
+
+Copy your ISO directly into the app's `files/` folder. The confirmed location for the **Fresh Install** test app is `/sdcard/Android/data/org.tsfp.quest.cleaninstall/files/`.
+
+```sh
+QUEST_FILES=/sdcard/Android/data/org.tsfp.quest/files
+adb shell mkdir -p "$QUEST_FILES"
+adb push "/path/to/your/game.iso" "$QUEST_FILES/"
+```
+
+The app may display `/storage/emulated/0/Android/data/org.tsfp.quest/files/`. On the tested Quest 3, `/sdcard` resolves to `/storage/emulated/0`, so both spellings refer to the same storage. Preserve the capital **A** in `Android`. For **Fresh Install**, substitute `org.tsfp.quest.cleaninstall` for the package name.
+
+Reopen the app under **Unknown Sources** or select **Refresh**, then select **Import** beside the ISO. The app checks the executable revision and free storage before extracting the game. Keep room for both the ISO and about 4 GB of extracted files. Import starts when you select **Import**. You can cancel it and retry. When it finishes, select **Play TimeSplitters**.
+
+### Option 2 — Copy an extracted game folder
+
+Copy the extracted game folder to the headset as `game`. It must contain `default.xbe`, `pak/` and `xmv/` directly at its top level. The required layout is shown below.
+
+```text
+Android/data/org.tsfp.quest/files/game/
+├── default.xbe
+├── pak/
+└── xmv/
+```
+
+You can also copy these items into an existing `game` folder using ADB.
+
+```sh
+GAME_DIR="/path/to/extracted/game"
+QUEST_GAME=/sdcard/Android/data/org.tsfp.quest/files/game
+adb shell mkdir -p "$QUEST_GAME"
+adb push "$GAME_DIR/default.xbe" "$GAME_DIR/pak" "$GAME_DIR/xmv" "$QUEST_GAME/"
+```
+
+Reopen the app or select **Refresh** to use the copied game files. For a first check, choose `Story → 2401 — Time to Split → Normal`. Later launches open the game directly.
+
+For the separate **Fresh Install** test app, use `org.tsfp.quest.cleaninstall` in these paths. Files extracted by the in-app ISO importer are stored in that app's private storage.
 
 Android accepts in-place updates signed by the same key. Back up your profile before switching to a build signed by a different key. Uninstalling removes the app's saves and app-specific game directory.
 
@@ -43,16 +73,19 @@ Android accepts in-place updates signed by the same key. Back up your profile be
 | Right stick left/right | Turn smoothly or snap by 30°, 45°, or 60° |
 | Right stick up/down | Next/previous weapon, one step per flick |
 | Tracked controllers | Aim held weapons |
+| Right stick click | Toggle the lens on the Vintage Rifle, Sniper Rifle, or Future Sniper |
 | Right / left trigger | Xbox RT / LT, including the game's firing actions |
 | Right **B** | Reload (Xbox **X**) |
-| Left **X** | Change grenade type, or zoom out while using the game's zoom |
-| Left **Y** | Change the current weapon's function, or zoom in while using the game's zoom |
+| Left **X** | Change grenade type, or step down one zoom level with the lens open |
+| Left **Y** | Change the current weapon's function, or step up one zoom level with the lens open |
 | Right **A** | Xbox **A** |
 | Left / right Grip | Xbox left / right shoulder inputs |
 | Left **Menu** (☰) | Pause / Xbox Start |
 | Hold both stick clicks for two seconds | Calibrate the tracked hands |
 
-The right stick aims mounted guns. While mounted, left **X** and **Y** send Xbox **B** and **Y**. In menus and on the virtual screen, the face buttons and sticks keep their original Xbox mappings. Hold both Grips and move the left stick to use the D-pad there.
+The right stick aims mounted guns horizontally and vertically. Press left **Y** to leave a turret or vehicle. At a mounted gun, left **X** sends Xbox **B**. In menus and on the virtual screen, the face buttons and sticks keep their original Xbox mappings. Hold both Grips and move the left stick to use the D-pad there.
+
+With a sniper rifle equipped, raise its optic into view and click the right stick. The lens moves with the rifle and shows the same magnified image to both eyes. The world around it stays in stereo. The lens closes when you switch weapons, open a menu, or lose controller tracking.
 
 Open **Settings → VR Options** from the main menu or **Options → VR Options** while paused. **Turn Type** defaults to **Smooth**. Select **Snap** to show **Snap Angle**. Changes apply immediately and are saved between launches.
 

@@ -33,4 +33,5 @@ vendor/stb/** -text -filter -whitespace linguist-vendored
 # Preserve literal CRLF context in Quest patches.
 patches/android-stereo-world.patch -text
 patches/android-xr-quality.patch -text
+patches/android-xr-scene-copy-resolution.patch -text
 patches/android-xr-screen-effects.patch -text

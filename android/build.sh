@@ -67,6 +67,15 @@ runtime_followups=(
     android-xr-train-effects.patch
     android-xr-paired-clears.patch
     android-xr-effect-scope.patch
+    android-xr-scene-copy-resolution.patch
+    android-xr-turret-reticle.patch
+    android-xr-uplink-map.patch
+    android-xr-sniper-scope.patch
+    android-xr-ghosts.patch
+    android-xr-turret-sprites.patch
+    android-xr-cinematics.patch
+    android-xr-chapter-mattes.patch
+    android-xr-matte-fallback.patch
 )
 # Check the newest matching patch first because later patches can change
 # context needed to reverse-check an earlier one.

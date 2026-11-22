@@ -1,0 +1,304 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -134,7 +134,8 @@
+     VkImage            image;
+     VmaAllocation      alloc;
+ #ifdef TSFP_OPENXR
+-    int                xr_layers;
++    uint32_t           xr_layers;
++    uint64_t           xr_scope_clear_frame;
+     int                xr_frame_copy, xr_msaa;
+     RhiView           *xr_right_frame;
+     RhiView           *xr_right_target;
+@@ -288,6 +289,9 @@
+     uint32_t                 xr_effect_view_mask;
+     uint32_t                 xr_uplink_eye_mask;
+     RhiBuffer               *xr_eye_constants, *xr_identity_constants;
++    RhiBuffer               *xr_scope_constants;
++    RhiView                 *xr_scope_image;
++    int                      xr_scope_capable, xr_scope_recording, xr_scope_drawn;
+     RhiBuffer               *xr_weapon_constants;
+     RhiBuffer               *xr_body_constants;
+     RhiBuffer               *xr_tracked_constants[TSFP_MODEL_TRACKED_COUNT];
+@@ -1035,19 +1039,35 @@
+     full_barrier(V.frames[V.fi].cmd);
+     V.rendering = 0;
+ }
++
++static void clear_image(RhiImage *img, uint32_t base_mip, uint32_t mips, uint32_t base_layer,
++                        uint32_t layers, VkImageAspectFlags aspect, const float *rgba,
++                        float z, uint32_t s);
+ 
+ #ifdef TSFP_OPENXR
+ static RhiBuffer *v_buffer_create(const RhiBufferDesc *d, const void *initial);
+ static void v_buffer_destroy(RhiBuffer *b);
+ static void v_buffer_update(RhiBuffer *b, const void *data);
+ 
++enum { XR_SCOPE_LAYER = 2, XR_SCOPE_LAYERS = 3, XR_SCOPE_MASK = 7, XR_CLIP_FLOATS = 48 };
++
+ static _Thread_local int xr_allocating;
+ 
+ int tsfp_vk_stereo_geometry(void)
+ {
+     return V.xr_eye_constants && V.xr_identity_constants;
++}
++
++int tsfp_vk_scope_supported(void)
++{
++    return V.xr_scope_constants && V.xr_world_color && V.xr_world_color->xr_layers == XR_SCOPE_LAYERS;
+ }
+ 
++int tsfp_vk_scope_recording(void)
++{
++    return V.xr_scope_recording;
++}
++
+ void tsfp_vk_stereo_size(uint32_t *width, uint32_t *height)
+ {
+     const VkExtent2D extent = tsfp_xr_geometry_extent();
+@@ -1060,8 +1080,8 @@
+ int tsfp_vk_stereo_allocating(int active)
+ {
+     if (active && V.feat_multiview && tsfp_xr_geometry_enabled() && !tsfp_vk_stereo_geometry()) {
+-        const RhiBufferDesc desc = { .size = 32 * sizeof(float), .usage = RHI_USAGE_DYNAMIC, .bind = RHI_BIND_UNIFORM };
+-        float identity[32] = {0};
++        const RhiBufferDesc desc = { .size = XR_CLIP_FLOATS * sizeof(float), .usage = RHI_USAGE_DYNAMIC, .bind = RHI_BIND_UNIFORM };
++        float identity[XR_CLIP_FLOATS] = {0};
+         for (unsigned i = 0; i < 4; ++i)
+             identity[i * 5] = identity[16 + i * 5] = 1.0f;
+         V.xr_eye_constants = v_buffer_create(&desc, identity);
+@@ -1071,6 +1091,8 @@
+             if (V.xr_identity_constants) v_buffer_destroy(V.xr_identity_constants);
+             V.xr_eye_constants = V.xr_identity_constants = NULL;
+         } else {
++            if (V.xr_scope_capable)
++                V.xr_scope_constants = v_buffer_create(&desc, identity);
+             V.xr_weapon_constants = v_buffer_create(&desc, identity);
+             V.xr_body_constants = v_buffer_create(&desc, identity);
+             for (unsigned hand = 0; hand < TSFP_AVATAR_HANDS; ++hand)
+@@ -1133,6 +1155,16 @@
+ {
+     return V.rt_color && V.rt_color->image == V.xr_world_color && V.rt_color->xr_array &&
+            (!V.rt_depth || V.rt_depth->xr_array);
++}
++
++static void clear_scope_layer(RhiView *view)
++{
++    RhiImage *image = view->image;
++    if (image->xr_scope_clear_frame == V.frame_no + 1)
++        return;
++    image->xr_scope_clear_frame = V.frame_no + 1;
++    const float black[4] = {0, 0, 0, 1};
++    clear_image(image, view->base_mip, 1, XR_SCOPE_LAYER, 1, image->aspect, black, 1, 0);
+ }
+ 
+ static int xr_fullscreen_draw(void)
+@@ -1192,11 +1224,16 @@
+                     d->width, d->height, d->image->desc.samples);
+         }
+         if (!V.xr_world_tried) {
+-            float rows[32];
++            float rows[XR_CLIP_FLOATS] = {0};
+             V.xr_world_tried = 1;
+             V.xr_world_active = c->xr_array && (!d || d->xr_array) && tsfp_xr_world_matrices(rows);
+-            if (V.xr_world_active)
++            if (V.xr_world_active) {
+                 v_buffer_update(V.xr_eye_constants, rows);
++                if (tsfp_vk_scope_supported() && tsfp_xr_scope_matrices(rows + 32)) {
++                    v_buffer_update(V.xr_scope_constants, rows);
++                    V.xr_scope_recording = 1;
++                }
++            }
+         }
+         if (!c->xr_array || (d && !d->xr_array))
+             V.xr_world_active = 0;
+@@ -1215,6 +1252,13 @@
+                 dv = d->xr_array;
+             view_mask = V.xr_uplink_eye_mask ? V.xr_uplink_eye_mask :
+                         V.xr_effect_view_mask ? V.xr_effect_view_mask : 3;
++            if (view_mask == 3 && V.xr_scope_recording && !tsfp_stereo_screen_effect_draw() &&
++                (!d || d->image->xr_layers == XR_SCOPE_LAYERS)) {
++                clear_scope_layer(c);
++                if (d)
++                    clear_scope_layer(d);
++                view_mask = XR_SCOPE_MASK;
++            }
+             if (!logged_pass) {
+                 logged_pass = 1;
+                 fprintf(stderr, "[M4] Scene render pass using two color/depth layers\n");
+@@ -1614,6 +1658,7 @@
+         VkPhysicalDeviceMultiviewProperties limits = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES };
+         VkPhysicalDeviceProperties2 properties = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &limits };
+         vkGetPhysicalDeviceProperties2(V.pd, &properties);
++        V.xr_scope_capable = limits.maxMultiviewViewCount >= XR_SCOPE_LAYERS;
+         if (limits.maxMultiviewViewCount >= 2) {
+             V.feat_multiview = 1;
+             views.multiview = VK_TRUE;
+@@ -2065,9 +2110,12 @@
+ #ifdef TSFP_OPENXR
+     if (tsfp_xr_enabled()) {
+         tsfp_uplink_render_destroy();
++        tsfp_scope_render_destroy();
+         tsfp_xr_destroy();
+         if (V.xr_eye_constants) v_buffer_destroy(V.xr_eye_constants);
+         if (V.xr_identity_constants) v_buffer_destroy(V.xr_identity_constants);
++        if (V.xr_scope_constants) v_buffer_destroy(V.xr_scope_constants);
++        if (V.xr_scope_image) v_view_destroy(V.xr_scope_image);
+         if (V.xr_weapon_constants) v_buffer_destroy(V.xr_weapon_constants);
+         if (V.xr_body_constants) v_buffer_destroy(V.xr_body_constants);
+         for (unsigned hand = 0; hand < TSFP_AVATAR_HANDS; ++hand)
+@@ -2160,6 +2208,7 @@
+ {
+ #ifdef TSFP_OPENXR
+     V.xr_world_tried = V.xr_world_active = 0;
++    V.xr_scope_recording = V.xr_scope_drawn = 0;
+     V.xr_weapon_uploaded = 0;
+     V.xr_body_uploaded = 0;
+     V.xr_tracked_uploaded = 0;
+@@ -2465,9 +2514,6 @@
+ 
+ /* ---- images --------------------------------------------------------------------------------- */
+ 
+-static void clear_image(RhiImage *img, uint32_t base_mip, uint32_t mips, uint32_t base_layer,
+-                        uint32_t layers, VkImageAspectFlags aspect, const float *rgba,
+-                        float z, uint32_t s);
+ static void v_image_update(RhiImage *img, uint32_t sub, const RhiBox *box,
+                            const void *data, uint32_t row_pitch, uint32_t slice_pitch);
+ 
+@@ -2511,8 +2557,8 @@
+         d->height == V.xr_world_color->desc.height;
+     if ((xr_allocating || scene_depth) && d->type == RHI_IMAGE_2D && target &&
+         ci.arrayLayers == 1 && ci.samples == VK_SAMPLE_COUNT_1_BIT) {
+-        img->xr_layers = 1;
+-        ci.arrayLayers = 2;
++        img->xr_layers = V.xr_scope_constants ? XR_SCOPE_LAYERS : 2;
++        ci.arrayLayers = img->xr_layers;
+     }
+ #endif
+     ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+@@ -2888,7 +2934,7 @@
+         ci.subresourceRange.baseArrayLayer == 0 && ci.subresourceRange.layerCount == 1) {
+         VkImageViewCreateInfo eye_view = ci;
+         eye_view.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+-        eye_view.subresourceRange.layerCount = 2;
++        eye_view.subresourceRange.layerCount = img->xr_layers;
+         vkCreateImageView(V.dev, &eye_view, NULL, &v->xr_array);
+     }
+     if (img->xr_layers && ci.viewType == VK_IMAGE_VIEW_TYPE_2D &&
+@@ -4254,7 +4300,7 @@
+                    buffer == V.xr_body_constants ? 'b' :
+                    buffer == V.xr_hud_constants ? 'u' :
+                    buffer == V.xr_weapon_constants ? 'w' :
+-                   buffer == V.xr_eye_constants ? 'e' : 'h';
++                   buffer == V.xr_eye_constants || buffer == V.xr_scope_constants ? 'e' : 'h';
+     for (unsigned role = 0; role < TSFP_MODEL_TRACKED_COUNT; ++role)
+         if (buffer && buffer == V.xr_tracked_constants[role])
+             xr_draw_kind = 't';
+@@ -4270,7 +4316,7 @@
+     const TsfpModelRole role = tsfp_stereo_model_role();
+     if (role == TSFP_MODEL_BODY) {
+         if (!V.xr_body_uploaded && V.xr_body_constants) {
+-            float rows[32];
++            float rows[XR_CLIP_FLOATS] = {0};
+             if (tsfp_stereo_body_matrices(rows)) {
+                 v_buffer_update(V.xr_body_constants, rows);
+                 V.xr_body_uploaded = 1;
+@@ -4281,7 +4327,7 @@
+     if (role == TSFP_MODEL_LEFT_HELD || role == TSFP_MODEL_RIGHT_HELD) {
+         const unsigned hand = role == TSFP_MODEL_LEFT_HELD ? TSFP_AVATAR_LEFT : TSFP_AVATAR_RIGHT;
+         if (!(V.xr_held_uploaded & (1u << hand)) && V.xr_held_constants[hand]) {
+-            float rows[32];
++            float rows[XR_CLIP_FLOATS] = {0};
+             if (tsfp_stereo_held_matrices(hand, rows)) {
+                 v_buffer_update(V.xr_held_constants[hand], rows);
+                 V.xr_held_uploaded |= 1u << hand;
+@@ -4292,7 +4338,7 @@
+     const int tracked_weapon = role >= TSFP_MODEL_LEFT_WEAPON && role < TSFP_MODEL_TRACKED_COUNT;
+     if (xr_hud_draw()) {
+         if (!V.xr_hud_uploaded) {
+-            float rows[32];
++            float rows[XR_CLIP_FLOATS] = {0};
+             if (!tsfp_xr_hud_matrices(rows))
+                 return V.xr_identity_constants;
+             v_buffer_update(V.xr_hud_constants, rows);
+@@ -4307,7 +4353,7 @@
+     }
+     if (xr_turret_reticle_draw()) {
+         if (!V.xr_turret_reticle_uploaded) {
+-            float rows[32];
++            float rows[XR_CLIP_FLOATS] = {0};
+             if (!tsfp_xr_turret_reticle_matrices(rows))
+                 return V.xr_identity_constants;
+             v_buffer_update(V.xr_turret_reticle_constants, rows);
+@@ -4317,11 +4363,15 @@
+     }
+     if (!V.xr_draw_world && !tracked_weapon)
+         return V.xr_identity_constants;
++    if (V.view_mask == XR_SCOPE_MASK && V.xr_draw_world && role == TSFP_MODEL_DEFAULT) {
++        V.xr_scope_drawn = 1;
++        return V.xr_scope_constants;
++    }
+     const float *projection = tsfp_stereo_weapon_projection();
+     if (tracked_weapon && projection && V.xr_tracked_constants[role]) {
+         const unsigned bit = 1u << role;
+         if (!(V.xr_tracked_uploaded & bit)) {
+-            float rows[32];
++            float rows[XR_CLIP_FLOATS] = {0};
+             if (tsfp_xr_tracked_matrices(projection, role, rows)) {
+                 v_buffer_update(V.xr_tracked_constants[role], rows);
+                 V.xr_tracked_uploaded |= bit;
+@@ -4341,7 +4391,7 @@
+     if (!projection || !V.xr_weapon_constants)
+         return V.xr_eye_constants;
+     if (!V.xr_weapon_uploaded) {
+-        float rows[32];
++        float rows[XR_CLIP_FLOATS] = {0};
+         if (!tsfp_xr_weapon_matrices(projection, rows))
+             return V.xr_eye_constants;
+         v_buffer_update(V.xr_weapon_constants, rows);
+@@ -4941,6 +4991,45 @@
+ RhiImage *tsfp_vk_uplink_source(void)
+ {
+     return V.xr_world_active && xr_world_target() ? V.xr_world_color : NULL;
++}
++
++RhiView *tsfp_vk_scope_finish(void)
++{
++    if (!V.xr_scope_recording)
++        return NULL;
++    V.xr_scope_recording = 0;
++    end_rendering();
++    if (!V.xr_scope_drawn || !tsfp_vk_scope_supported())
++        return NULL;
++    RhiImage *source = V.xr_world_color;
++    if (!V.xr_scope_image) {
++        const RhiImageDesc desc = {.type = RHI_IMAGE_2D, .format = source->desc.format,
++            .width = 768, .height = 768, .depth = 1, .mip_levels = 1, .samples = 1,
++            .bind = RHI_BIND_SAMPLED};
++        RhiImage *image = v_image_create(&desc, NULL);
++        if (!image)
++            return NULL;
++        V.xr_scope_image = v_view_create(image, RHI_VIEW_SAMPLED, NULL);
++        v_image_destroy(image);
++        if (!V.xr_scope_image)
++            return NULL;
++    }
++
++    RhiImage *scope = V.xr_scope_image->image;
++    const VkImageLayout restore = source->layout;
++    to_layout(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++    to_layout(scope, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++    const VkImageBlit blit = {
++        .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, XR_SCOPE_LAYER, 1},
++        .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++        .srcOffsets = {{0, 0, 0}, {(int32_t)source->desc.width, (int32_t)source->desc.height, 1}},
++        .dstOffsets = {{0, 0, 0}, {(int32_t)scope->desc.width, (int32_t)scope->desc.height, 1}},
++    };
++    vkCmdBlitImage(cmd(), source->image, source->layout, scope->image, scope->layout,
++                   1, &blit, VK_FILTER_NEAREST);
++    to_layout(scope, scope->steady);
++    to_layout(source, restore);
++    return V.xr_scope_image;
+ }
+ 
+ void tsfp_vk_uplink_eye(unsigned mask)
