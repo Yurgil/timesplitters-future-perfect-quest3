@@ -251,3 +251,12 @@
 
 - В сцене 18 автомат Machine Gun (`machinepistol_anim`, ID 31 по журналу `logs/quest-0.3.96-water-tower-scope.log`) сдвинут ещё на 8 см вперёд. Рукоять теперь на 17,5 см впереди, 3 см левее и 4 см ниже кисти.
 - `weapon_mount` с ASan/UBSan проверил все 40 профилей. `TSFP_OPTIMIZE_GUEST=1 TSFP_JOBS=6 android/build.sh` собрал `build/android-optimized/timesplitters-xr-0.3.98-machine-gun-fit-debug.apk` (код 101). Подпись, выравнивание и ARM64 проверены. SHA-256 `3d8d17cd28e9d753c95f90961ea3da4fdc67b1e64c0698c605c517997b8cf19c`. Установка и проверка на Quest 3 остаются открытыми.
+
+## Подготовка публичного релиза 0.3.98-xr · 23 ноября 2026
+
+- В опубликованный форк отправлены изменения до 0.3.98-xr, включая установщик ISO, постоянную калибровку, VR-оптику, турели, транспорт, экранные эффекты и актуальные посадки оружия. Коммит исходников — 4194f001a70fd6ec25fc67bdf122db9f2acf8841.
+- Полный набор патчей применён к закреплённым исходникам. С рабочим деревом совпали 169 файлов Xbox runtime и четыре файла PC-слоя. stereo_math прошёл с ASan/UBSan, weapon_mount проверил 40 профилей, синтетические XboxDiscTest прошли с javac --release 8 -Xlint:all -Werror.
+- TSFP_JOBS=6 android/build.sh --release собрал подписанный пакет org.tsfp.quest, версия 0.3.98-xr, код 101. Сохранены NDK 27.0.12077973, Clang 18.0.1, CMake 3.22.1, JDK 17 и Build Tools 35.0.0. Перед сборкой и после неё сверены хеши 71 файла исходников и патчей.
+- apksigner verify и zipalign -c -P 16 4 прошли. aapt2 подтвердил LauncherActivity, единственный ABI arm64-v8a и отсутствие debuggable. В обеих библиотеках отсутствуют .debug_*; отсутствуют маркеры boot.log, xbox_kernel.log, XR-TIME, TSFP-Hitch, XR-GHOST, XR-MATTE, XR-TURRET и запроса захвата XR. TSFP_RELEASE и оптимизация guest включены.
+- Подготовленный APK — build/releases/quest-v0.3.98/timesplitters-quest3-release.apk. SHA-256 a7e0a7c771b748f37c762714ce1ee9d17bb7a420984c0e8ed11e241b1e132da6. Рядом находятся SHA256SUMS, THIRD-PARTY-LICENSES.zip и описание релиза.
+- Этот финальный релизный APK в шлеме в рамках публикации не запускался. Последние визуальные проверки, отмеченные выше как открытые, остаются открытыми. Публикация GitHub Release требует отдельной авторизации HTTPS API, исходники отправлены SSH-ключом владельца.
