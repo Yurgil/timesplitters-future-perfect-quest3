@@ -18,6 +18,9 @@ extern void tsfp_stereo_overlay(int begin);
 extern void tsfp_stereo_screen_effects(int begin);
 extern void tsfp_stereo_first_person_weapon_pass(int begin);
 extern int tsfp_xr_world_active(void);
+#ifndef TSFP_RELEASE
+extern void tsfp_stereo_trace_projectile(uint32_t stack);
+#endif
 extern void *tsfp_stereo_begin_visibility(float saved[16], int objects);
 extern int tsfp_stereo_object_outside(uint32_t entity, const float minimum[3], const float maximum[3]);
 extern int tsfp_stereo_uplink_begin(uint32_t state);
@@ -49,9 +52,20 @@ static void flush_guest_draws(void)
 
 void tsfp_quest_projectile(void)
 {
+#ifndef TSFP_RELEASE
+    tsfp_stereo_trace_projectile(g_esp);
+#endif
     tsfp_stereo_redirect_projectile(g_esp, g_ebx);
     sub_001B7680();
 }
+
+#ifndef TSFP_RELEASE
+void tsfp_quest_trace_projectile(void)
+{
+    tsfp_stereo_trace_projectile(g_esp);
+    sub_001B7680();
+}
+#endif
 
 void tsfp_quest_muzzle_flash(void)
 {
@@ -352,11 +366,11 @@ typedef struct {
     int fp_top, fp_cmp;
     uint16_t fp_cc;
     tsfp_status_flags flags;
-} GhostRegisters;
+} EffectRegisters;
 
-static GhostRegisters ghost_registers(void)
+static EffectRegisters effect_registers(void)
 {
-    GhostRegisters regs = {
+    EffectRegisters regs = {
         .eax = g_eax, .ebx = g_ebx, .ecx = g_ecx, .edx = g_edx, .esi = g_esi,
         .edi = g_edi, .ebp = g_ebp, .esp = g_esp, .seh = g_seh_ebp,
         .xmm = {g_xmm0, g_xmm1, g_xmm2, g_xmm3, g_xmm4, g_xmm5, g_xmm6, g_xmm7},
@@ -366,7 +380,7 @@ static GhostRegisters ghost_registers(void)
     return regs;
 }
 
-static void restore_ghost_registers(const GhostRegisters *regs)
+static void restore_effect_registers(const EffectRegisters *regs)
 {
     g_eax = regs->eax; g_ebx = regs->ebx; g_ecx = regs->ecx; g_edx = regs->edx;
     g_esi = regs->esi; g_edi = regs->edi; g_ebp = regs->ebp; g_esp = regs->esp;
@@ -390,7 +404,24 @@ static void set_guest_camera(uint32_t view, uint32_t projection)
     g_esp = stack;
 }
 
-static void draw_ghost_actor(void (*draw)(void))
+typedef struct {
+    uint32_t low, high, calls;
+} EffectRandom;
+
+/* Screen effects can use the guest's shared RNG. */
+static EffectRandom effect_random(void)
+{
+    return (EffectRandom){MEM32(0x004E7950u), MEM32(0x004E7954u), MEM32(0x007497C8u)};
+}
+
+static void restore_effect_random(EffectRandom random)
+{
+    MEM32(0x004E7950u) = random.low;
+    MEM32(0x004E7954u) = random.high;
+    MEM32(0x007497C8u) = random.calls;
+}
+
+static void draw_eye_projected_effect(void (*draw)(void), int screen_routine)
 {
     TsfpGhostCamera camera;
     if (!tsfp_vk_ghost_ready() || !tsfp_stereo_ghost_camera(&camera)) {
@@ -398,24 +429,46 @@ static void draw_ghost_actor(void (*draw)(void))
         return;
     }
 
-    /* Both effects calculate screen bounds on the CPU. Replay their model,
+    /* These effects calculate screen bounds on the CPU. Replay their model,
      * scratch/feedback and composite passes with a single eye throughout. */
-    const GhostRegisters entry = ghost_registers();
+    const EffectRegisters entry = effect_registers();
     float active_camera[2][16];
     memcpy(active_camera, (const void *)XBOX_PTR(0x0055FA00u), sizeof active_camera);
     flush_guest_draws();
-    GhostRegisters result;
+    const int previous_routine = tsfp_stereo_screen_effect_draw();
+    TsfpScreenOverlay previous_overlay = TSFP_SCREEN_OVERLAY_NONE;
+    EffectRandom random_start = {0}, random_end = {0};
+    if (screen_routine) {
+        tsfp_stereo_screen_effects(screen_routine);
+        previous_overlay = tsfp_stereo_set_screen_overlay(TSFP_SCREEN_OVERLAY_SCENE);
+        random_start = random_end = effect_random();
+    }
+    EffectRegisters result;
     for (unsigned eye = 0; eye < TSFP_XR_EYES; ++eye) {
         tsfp_vk_ghost_eye(eye + 1u);
         for (unsigned i = 0; i < TSFP_GHOST_CAMERA_MATRICES; ++i)
             memcpy(camera.matrix[i], camera.eyes[eye][i], sizeof camera.eyes[eye][i]);
         set_guest_camera(camera.address[TSFP_GHOST_CAMERA_VIEW], camera.address[TSFP_GHOST_CAMERA_PROJECTION]);
-        restore_ghost_registers(&entry);
+        restore_effect_registers(&entry);
+        if (screen_routine)
+            restore_effect_random(random_start);
         draw();
-        result = ghost_registers();
+        result = effect_registers();
         flush_guest_draws();
+        if (screen_routine) {
+            /* A shockwave outside one eye's frustum can consume no random
+             * values. Commit the sequence for the eye that drew the effect. */
+            const EffectRandom random = effect_random();
+            if (random.calls - random_start.calls > random_end.calls - random_start.calls)
+                random_end = random;
+        }
     }
     tsfp_vk_ghost_eye(0);
+    if (screen_routine) {
+        restore_effect_random(random_end);
+        tsfp_stereo_set_screen_overlay(previous_overlay);
+        tsfp_stereo_screen_effects(previous_routine);
+    }
     for (unsigned i = 0; i < TSFP_GHOST_CAMERA_MATRICES; ++i)
         memcpy(camera.matrix[i], camera.original[i], sizeof camera.original[i]);
 
@@ -423,17 +476,37 @@ static void draw_ghost_actor(void (*draw)(void))
     g_esp = (result.esp - sizeof active_camera) & ~15u;
     memcpy((void *)XBOX_PTR(g_esp), active_camera, sizeof active_camera);
     set_guest_camera(g_esp, g_esp + sizeof active_camera[0]);
-    restore_ghost_registers(&result);
+    restore_effect_registers(&result);
 }
 
 void tsfp_quest_ghost_actor(void)
 {
-    draw_ghost_actor(sub_00121F50);
+    draw_eye_projected_effect(sub_00121F50, 0);
 }
 
 void tsfp_quest_ghost_reveal(void)
 {
-    draw_ghost_actor(sub_00122F10);
+    draw_eye_projected_effect(sub_00122F10, 0);
+}
+
+void tsfp_quest_dispersion_impact(void)
+{
+    draw_eye_projected_effect(sub_000FA640, 0x000FA640);
+}
+
+void tsfp_quest_time_grenade_effect(void)
+{
+    draw_eye_projected_effect(sub_000FAD90, 0x000FAD90);
+}
+
+void tsfp_quest_mag_charger_shot(void)
+{
+    draw_eye_projected_effect(sub_000FBD70, 0x000FBD70);
+}
+
+void tsfp_quest_mag_charger_vision(void)
+{
+    draw_eye_projected_effect(sub_00344EA0, TSFP_MAG_CHARGER_VISION_ROUTINE);
 }
 
 static void preview_uplink_target(void)

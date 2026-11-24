@@ -9,6 +9,7 @@ export ANDROID_HOME="/path/to/android/sdk"
 export JAVA_HOME="/path/to/jdk-17/Contents/Home"
 export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$PATH"
 mkdir -p external
+git submodule update --init --recursive external/RecompVR
 
 GIT_LFS_SKIP_SMUDGE=1 git clone --no-checkout \
   https://github.com/TheDoffman/timesplitters-future-perfect-pc.git external/tsfp-pc
@@ -19,14 +20,73 @@ git clone --branch release-1.1.49 --depth 1 \
 test "$(git -C external/openxr-sdk-source rev-parse HEAD)" = 47c4761d05b27f884247480ac3fb8a6657907325
 ```
 
+## Shared RecompVR source
+
+RecompVR is pinned as the `external/RecompVR` Git submodule. A checkout created
+with `git clone --recurse-submodules` includes it automatically. After pulling
+changes that update its pin, run:
+
+```sh
+git submodule update --init --recursive external/RecompVR
+```
+
+`android/build.sh` explicitly selects this copy, including when a reused CMake
+cache points to a previous shared directory. For development, set
+`TSFP_RECOMPVR_ROOT=/absolute/path/to/RecompVR` before running the script; direct
+CMake builds accept `-DRECOMPVR_ROOT=/absolute/path/to/RecompVR`. Updating a
+submodule pin is a deliberate source change and requires validation in this
+game. Other projects can pin their own revisions independently.
+
+## Local storage on Kingston
+
+On the project Mac, mount **KINGSTON** before generating code, building or accessing the extracted dump. The data root is `/Volumes/KINGSTON/StandaloneVRProjects/data/timesplitters-future-perfect-quest3`. The checkout uses these ignored symbolic links, so commands still run from the repository using the paths below.
+
+| Checkout path | Directory under the data root |
+| --- | --- |
+| `private/game` | `game` |
+| `external/tsfp-pc/external/ts3FPrecomp/titles/futureperfect/src/recomp/gen` | `recomp-gen` |
+| `external/tsfp-pc/private/pipeline` | `pipeline` |
+| `captures` (historical screenshots) | `captures` |
+
+On this Mac, the checkout, local tools and signing files live on the mounted `/Volumes/StandaloneVRProjects` APFS volume backed by Kingston. The `build` link uses `/Volumes/StandaloneVRProjects/builds/timesplitters-future-perfect-quest3` for current native builds. Historical APKs and the original US Xbox ISO are under `StandaloneVRProjects/data` on Kingston. The build stages APK packaging in the workspace `build-tmp` directory. Follow the README's installation steps to provide the game data separately on the headset.
+
+For a fresh checkout, normal local directories work on any supported Mac. To use Kingston, connect it and verify the mount with `mount | grep ' on /Volumes/KINGSTON '` before creating the project directory and the links. Create links only where the checkout path is absent. If a path already contains data, copy it and verify the copy before replacing the directory with a link.
+
+```sh
+data=/Volumes/KINGSTON/StandaloneVRProjects/data/timesplitters-future-perfect-quest3
+mkdir -p "$data/game" "$data/recomp-gen" "$data/pipeline" private build
+ln -s "$data/game" private/game
+```
+
+After preparing the Xbox runtime in the next section and before generating C, create the other two build links from the Quest repository root.
+
+```sh
+pc=external/tsfp-pc
+recomp="$pc/external/ts3FPrecomp/titles/futureperfect/src/recomp"
+mkdir -p "$pc/private" "$recomp"
+ln -s "$data/pipeline" "$pc/private/pipeline"
+ln -s "$data/recomp-gen" "$recomp/gen"
+```
+
+If `build` is a link, `android/build.sh` reads or creates the debug keystore at `private/signing/debug.keystore`. For an existing installation, preserve its debug signing identity by copying the previous profile's `debug.keystore` there before moving the build tree.
+
 ## Prepare the game dump
 
-Place your extracted **US Xbox** dump in `private/game` or make that path a symbolic link to the dump. If you have an ISO, import it using the pinned PC project's importer.
+Place your extracted **US Xbox** dump in `private/game` or make that path a symbolic link to the dump. If you have an ISO, import it using the pinned PC project's importer. On this Mac, Kingston uses exFAT and the importer needs hard links, so import into a temporary directory on the internal APFS volume first.
 
 ```sh
 mkdir -p private
+game_dir="$PWD/private/game"
+# For Kingston, use game_dir="$(mktemp -d /private/tmp/tsfp-game.XXXXXX)".
 python3 external/tsfp-pc/tools/build/import-game.py \
-  --iso "/path/to/your/game.iso" --output "$PWD/private/game"
+  --iso "/path/to/your/game.iso" --output "$game_dir"
+```
+
+For Kingston, copy from the temporary directory into an empty `game` directory. Check that the final command reports no differences before removing the temporary copy.
+
+```sh
+rsync -rt "$game_dir/" "$data/game/"
+rsync -rctni --modify-window=1 "$game_dir/" "$data/game/"
 ```
 
 For either path, check the executable revision and presence of `pak/` and `xmv/`.
@@ -67,7 +127,7 @@ scanner="$runtime/third_party/XbSymbolDatabase"
 )
 ```
 
-After generation, `android/build.sh` applies the Quest patches. Keep the dump, generated C files, Android intermediates and signing files local.
+After generation, `android/build.sh` applies the Quest patches. Keep the dump, generated C files, Android intermediates and signing files out of Git.
 
 ## Sign and build a release APK
 
@@ -106,5 +166,9 @@ tools="$ANDROID_HOME/build-tools/35.0.0"
 Follow the [installation instructions](../README.md#install-a-release-apk) using this APK. Saves live in the app's private data directory. For diagnostic builds, see [M0](m0.md) and [M3](m3.md).
 
 ## Component licenses
+
+RecompVR has its own [MIT license](https://github.com/Yurgil/RecompVR/blob/f59e9d7abc2c4697c6dae2b6b365b87b3d1603e8/LICENSE). Include this
+notice when distributing the library or a linked game build. Its source version
+is the commit pinned by the submodule; it does not change the Quest port's license.
 
 The fork preserves the upstream [LICENSE](../LICENSE), [NOTICE](../NOTICE) and [component notices](../LICENSES/README.md). The pinned Xbox runtime includes the SDL, Vulkan-Headers, Vulkan Memory Allocator and volk license files at the pinned submodule revisions. The [OpenXR SDK source](https://github.com/KhronosGroup/OpenXR-SDK-Source/tree/47c4761d05b27f884247480ac3fb8a6657907325) carries its own notices, and the Android NDK Shaderc sources retain their licenses. Keep the applicable notices and corresponding sources with any authorized redistribution. The upstream GPL does not grant rights to the original game or its translated logic.

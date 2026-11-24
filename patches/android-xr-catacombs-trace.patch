@@ -1,0 +1,40 @@
+--- a/src/hle/hle_d3d8.c
++++ b/src/hle/hle_d3d8.c
+@@ -4820,6 +4820,17 @@
+         return shadow_expand_generic_vertices(verts, vertices, stride, first, failed);
+     return shadow_expand_packed_vertices(verts, vertices, stride, first, failed);
+ }
++#ifdef TSFP_QUEST_HITCH_TRACE
++static void quest_trace_lines(D3DPRIMITIVETYPE type, uint32_t count,
++                             const void *vertices, uint32_t stride)
++{
++    extern void tsfp_stereo_trace_lines(uint32_t stack, uint32_t shader, int programmable,
++                                      uint32_t count, const void *vertices, uint32_t stride);
++    if (type == D3DPT_LINELIST || type == D3DPT_LINESTRIP)
++        tsfp_stereo_trace_lines(g_esp, g_shadow_vs, g_shadow_vs_is_program, count, vertices, stride);
++}
++#endif
++
+ /* The host half of every non-indexed draw: the UP draw below and the vertex
+  * buffer draws in hle_d3d8_vertex.c. `verts` is already a host pointer to the
+  * first vertex; from_buffer only picks the counter the draw lands in. */
+@@ -4840,6 +4851,9 @@
+         g_draws_primitive++;
+         return;
+     }
++#ifdef TSFP_QUEST_HITCH_TRACE
++    quest_trace_lines(pt, count, verts, stride);
++#endif
+     expanded = shadow_expand_vertices(verts, count, &host_stride,
+                                       from_buffer ? g_draw_first : NO_FIRST_VERTEX,
+                                       &failed);
+@@ -4897,6 +4911,9 @@
+         g_draws_primitive++;
+         return;
+     }
++#ifdef TSFP_QUEST_HITCH_TRACE
++    quest_trace_lines(pt, count, verts, stride);
++#endif
+     /* Only the vertices between the lowest and highest index are handed to
+      * the host, with the indices rebased to start at zero. A title that
+      * draws a level from one shared vertex buffer indexes tens of thousands

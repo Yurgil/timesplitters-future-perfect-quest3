@@ -179,6 +179,7 @@ static void check_pose(unsigned id, const TsfpWeaponProfile *profile, unsigned h
     XrMatrix4x4f target;
     assert(tsfp_weapon_target(id, hand, story_scene, wrist, aim, &target));
     const int story = story_scene != TSFP_WEAPON_NO_STORY;
+    const int u_genix = story_scene == TSFP_SCENE_BREAKING_AND_ENTERING || story_scene == TSFP_SCENE_U_GENIX;
     XrVector3f forward, top;
     XrQuaternionf_RotateVector3f(&forward, &aim, &(XrVector3f){0,0,-1});
     XrQuaternionf_RotateVector3f(&top, &aim, &(XrVector3f){0,-1,0});
@@ -212,6 +213,23 @@ static void check_pose(unsigned id, const TsfpWeaponProfile *profile, unsigned h
         neutral_offset = (XrVector3f){.060f, 0, -.180f};
     if (story_scene == TSFP_SCENE_RUSSIAN_CONNECTION && id == 31)
         neutral_offset = (XrVector3f){.030f, .040f, -.175f};
+    if ((story_scene == TSFP_SCENE_MANSION || story_scene == TSFP_SCENE_CATACOMBS) &&
+        id == TSFP_WEAPON_DOUBLE_BARREL)
+        neutral_offset = (XrVector3f){.030f, 0, -.110f};
+    if (story_scene == TSFP_SCENE_CATACOMBS && id == TSFP_WEAPON_HARPOON)
+        neutral_offset = (XrVector3f){0, 0, -.225f};
+    if (story_scene == TSFP_SCENE_BREAKING_AND_ENTERING) {
+        switch (id) {
+        case TSFP_WEAPON_LX18: neutral_offset = (XrVector3f){.040f, .060f, -.045f}; break;
+        case TSFP_WEAPON_MAG_CHARGER: neutral_offset = (XrVector3f){.030f, -.020f, -.145f}; break;
+        }
+    }
+    if (u_genix && id == TSFP_WEAPON_SBP500)
+        neutral_offset = (XrVector3f){0, -.070f, -.015f};
+    if (u_genix && id == TSFP_WEAPON_DISPERSION_GUN)
+        neutral_offset = (XrVector3f){.030f, .070f, -.085f};
+    if (story_scene == TSFP_SCENE_U_GENIX && id == TSFP_WEAPON_INJECTOR)
+        neutral_offset = (XrVector3f){.030f, 0, -.075f};
     if (story_scene == TSFP_SCENE_MANSION && id == 10)
         neutral_offset = (XrVector3f){.030f, -.150f, -.160f};
     if (story_scene == TSFP_SCENE_MANSION && id == 33)
@@ -226,6 +244,9 @@ static void check_pose(unsigned id, const TsfpWeaponProfile *profile, unsigned h
     if (story && id == TSFP_WEAPON_BASEBALL_BAT) {
         near(model_forward, top);
         near(model_top, (XrVector3f){-forward.x, -forward.y, -forward.z});
+    } else if (u_genix && id == TSFP_WEAPON_SBP500) {
+        near(model_forward, forward);
+        near(model_top, (XrVector3f){-top.x, -top.y, -top.z});
     } else {
         near(model_forward, forward);
         assert(XrVector3f_Dot(&model_top, &top) > .1f);
@@ -481,6 +502,9 @@ int main(int argc, char **argv)
                     check_pose(id, profile, hand, TSFP_SCENE_SCOTLAND, poses[i]);
                     check_pose(id, profile, hand, TSFP_SCENE_RUSSIAN_CONNECTION, poses[i]);
                     check_pose(id, profile, hand, TSFP_SCENE_MANSION, poses[i]);
+                    check_pose(id, profile, hand, TSFP_SCENE_CATACOMBS, poses[i]);
+                    check_pose(id, profile, hand, TSFP_SCENE_BREAKING_AND_ENTERING, poses[i]);
+                    check_pose(id, profile, hand, TSFP_SCENE_U_GENIX, poses[i]);
                 }
         ++passed;
     }

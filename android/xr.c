@@ -11,6 +11,9 @@
 #define XR_USE_GRAPHICS_API_VULKAN
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+#include <recompvr/android.h>
+#include <recompvr/openxr.h>
+#include <recompvr/vulkan.h>
 #include "projection_probe.h"
 #include "sniper_scope.h"
 #include "stereo_backend.h"
@@ -50,7 +53,7 @@ static char legacy_hand_calibration_file[4096];
 static atomic_int pending_hand_calibration;
 static struct {
     int running, acquired, frame_open, positioned, eyes_valid, early_frame;
-    int wants_world, world_active, reuse_world;
+    int world_scene, world_active, reuse_world, stereo_committed, projection_restart;
     float world_near, world_far;
     XrInstance instance;
     XrSystemId system;
@@ -80,7 +83,6 @@ static struct {
     int last_snap_degrees;
     XrActionSet controls;
     XrAction actions[ACTIONS];
-    PFN_xrGetVulkanGraphicsDevice2KHR get_physical;
     PFN_xrCreateVulkanDeviceKHR create_device;
     uint32_t frames, projection_frames, early_frames;
 } xr;
@@ -90,6 +92,12 @@ static pthread_mutex_t frame_lock = PTHREAD_MUTEX_INITIALIZER;
 static RecompPadState pad;
 
 #ifndef TSFP_RELEASE
+static struct {
+    uint32_t frame, missed, waited_for_fresh;
+    int source_ready, copy_recorded, early_acquire;
+    XrDuration wait_budget;
+} stereo_diagnostic;
+
 /* Written by the renderer thread. The intervals include the guest work
  * between presents, while the wait counters cover the named host calls. */
 static struct {
@@ -397,9 +405,6 @@ int tsfp_xr_create_instance(PFN_vkGetInstanceProcAddr get_proc, const VkInstance
             (*env)->DeleteLocalRef(env, activity);
         return 0;
     }
-    PFN_xrInitializeLoaderKHR initialize;
-    XrLoaderInitInfoAndroidKHR loader = { .type = XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR,
-        .applicationVM = vm, .applicationContext = activity };
     XrInstanceCreateInfoAndroidKHR android = { .type = XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR,
         .applicationVM = vm, .applicationActivity = activity };
     const char *extensions[] = { XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
@@ -408,8 +413,7 @@ int tsfp_xr_create_instance(PFN_vkGetInstanceProcAddr get_proc, const VkInstance
         .applicationInfo = { .applicationName = "TimeSplitters Quest",
             .engineName = "xboxrecomp", .apiVersion = XR_API_VERSION_1_0 },
         .enabledExtensionCount = 2, .enabledExtensionNames = extensions };
-    int created = PROC(XR_NULL_HANDLE, xrInitializeLoaderKHR, initialize) &&
-        CHECK(initialize((const XrLoaderInitInfoBaseHeaderKHR *)&loader)) &&
+    int created = CHECK(recompvr_initialize_android_loader(vm, activity)) &&
         CHECK(xrCreateInstance(&create, &xr.instance));
     (*env)->DeleteLocalRef(env, activity);
     if (!created)
@@ -423,7 +427,6 @@ int tsfp_xr_create_instance(PFN_vkGetInstanceProcAddr get_proc, const VkInstance
         !PROC(xr.instance, xrGetVulkanGraphicsRequirements2KHR, get_requirements) ||
         !CHECK(get_requirements(xr.instance, xr.system, &requirements)) ||
         !PROC(xr.instance, xrCreateVulkanInstanceKHR, create_vulkan) ||
-        !PROC(xr.instance, xrGetVulkanGraphicsDevice2KHR, xr.get_physical) ||
         !PROC(xr.instance, xrCreateVulkanDeviceKHR, xr.create_device))
         return 0;
     fprintf(stderr, "[XR] Vulkan requirements %u.%u to %u.%u\n",
@@ -441,9 +444,7 @@ int tsfp_xr_create_instance(PFN_vkGetInstanceProcAddr get_proc, const VkInstance
 
 int tsfp_xr_physical_device(VkInstance instance, VkPhysicalDevice *physical)
 {
-    XrVulkanGraphicsDeviceGetInfoKHR info = { .type = XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR,
-        .systemId = xr.system, .vulkanInstance = instance };
-    return CHECK(xr.get_physical(xr.instance, &info, physical));
+    return CHECK(recompvr_vulkan_graphics_device(xr.instance, xr.system, instance, physical));
 }
 
 int tsfp_xr_create_device(PFN_vkGetInstanceProcAddr get_proc, VkPhysicalDevice physical,
@@ -535,13 +536,9 @@ int tsfp_xr_create_screen(VkInstance instance, VkPhysicalDevice physical, VkDevi
     XrGraphicsBindingVulkan2KHR binding = { .type = XR_TYPE_GRAPHICS_BINDING_VULKAN2_KHR,
         .instance = instance, .physicalDevice = physical, .device = device, .queueFamilyIndex = family };
     XrSessionCreateInfo create = { .type = XR_TYPE_SESSION_CREATE_INFO, .next = &binding, .systemId = xr.system };
-    XrReferenceSpaceCreateInfo space = { .type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO,
-        .referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL, .poseInReferenceSpace.orientation.w = 1 };
     if (!CHECK(xrCreateSession(xr.instance, &create, &xr.session)) || !create_actions() ||
-        !CHECK(xrCreateReferenceSpace(xr.session, &space, &xr.local)))
-        return 0;
-    space.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
-    if (!CHECK(xrCreateReferenceSpace(xr.session, &space, &xr.view)))
+        !CHECK(recompvr_create_reference_space(xr.session, XR_REFERENCE_SPACE_TYPE_LOCAL, &xr.local)) ||
+        !CHECK(recompvr_create_reference_space(xr.session, XR_REFERENCE_SPACE_TYPE_VIEW, &xr.view)))
         return 0;
 
     uint32_t count;
@@ -637,26 +634,19 @@ static XrActionStateGetInfo action_info(int action, int hand)
 static int button(int action, int hand)
 {
     XrActionStateGetInfo info = action_info(action, hand);
-    XrActionStateBoolean state = { .type = XR_TYPE_ACTION_STATE_BOOLEAN };
-    return XR_SUCCEEDED(xrGetActionStateBoolean(xr.session, &info, &state)) && state.isActive && state.currentState;
+    return recompvr_read_button(xr.session, &info);
 }
 
 static float analog(int action, int hand)
 {
     XrActionStateGetInfo info = action_info(action, hand);
-    XrActionStateFloat state = { .type = XR_TYPE_ACTION_STATE_FLOAT };
-    if (XR_FAILED(xrGetActionStateFloat(xr.session, &info, &state)) || !state.isActive)
-        return 0;
-    return fminf(1.0f, fmaxf(0.0f, state.currentState));
+    return fminf(1.0f, fmaxf(0.0f, recompvr_read_float(xr.session, &info)));
 }
 
 static XrVector2f stick(int hand)
 {
     XrActionStateGetInfo info = action_info(STICK, hand);
-    XrActionStateVector2f state = { .type = XR_TYPE_ACTION_STATE_VECTOR2F };
-    if (XR_FAILED(xrGetActionStateVector2f(xr.session, &info, &state)) || !state.isActive)
-        return (XrVector2f){0};
-    return state.currentState;
+    return recompvr_read_stick(xr.session, &info);
 }
 
 static int16_t axis(float value)
@@ -693,15 +683,9 @@ static void locate_touch_poses(void)
             if (!xr.touch_space[kind][hand])
                 continue;
             const XrActionStateGetInfo info = action_info(pose_actions[kind], hand);
-            XrActionStatePose state = { .type = XR_TYPE_ACTION_STATE_POSE };
-            XrSpaceLocation location = { .type = XR_TYPE_SPACE_LOCATION };
-            if (XR_SUCCEEDED(xrGetActionStatePose(xr.session, &info, &state)) && state.isActive &&
-                XR_SUCCEEDED(xrLocateSpace(xr.touch_space[kind][hand], xr.local,
-                                           xr.frame.predictedDisplayTime, &location)) &&
-                (location.locationFlags & valid) == valid) {
-                xr.touch_pose[kind][hand] = location.pose;
+            if (recompvr_locate_action(xr.session, &info, xr.touch_space[kind][hand], xr.local,
+                                      xr.frame.predictedDisplayTime, valid, &xr.touch_pose[kind][hand]))
                 xr.touch_valid |= 1u << (kind * HANDS + hand);
-            }
         }
     static unsigned reported;
     if (xr.touch_valid & ~reported) {
@@ -838,13 +822,26 @@ static void poll_events(void)
             xr.state = change->state;
             fprintf(stderr, "[XR] Session state %d\n", xr.state);
             if (xr.state == XR_SESSION_STATE_READY) {
-                XrSessionBeginInfo begin = { .type = XR_TYPE_SESSION_BEGIN_INFO,
-                    .primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO };
-                xr.running = CHECK(xrBeginSession(xr.session, &begin));
+                if (xr.projection_restart) {
+                    xr.projection_restart = 0;
+                    const int restarted = tsfp_projection_restart(xr.session);
+#ifndef TSFP_RELEASE
+                    fprintf(stderr, "[XR-STEREO] Stereo swapchain restart %s\n",
+                            restarted ? "complete" : "failed");
+#else
+                    (void)restarted;
+#endif
+                }
+                xr.running = CHECK(recompvr_begin_stereo_session(xr.session));
             } else if (xr.state == XR_SESSION_STATE_STOPPING) {
                 xr.running = 0;
+#ifndef TSFP_RELEASE
+                fprintf(stderr, "[XR-STEREO] Cache invalidated before frame %u scene=%d reason=session-stopping\n",
+                        stereo_diagnostic.frame + 1u, xr.world_scene);
+#endif
                 tsfp_projection_forget_geometry();
-                CHECK(xrEndSession(xr.session));
+                if (CHECK(xrEndSession(xr.session)))
+                    xr.projection_restart = geometry_requested && !geometry_disabled;
             } else if (xr.state == XR_SESSION_STATE_EXITING || xr.state == XR_SESSION_STATE_LOSS_PENDING) {
                 xr.running = 0;
             } else if (xr.state == XR_SESSION_STATE_FOCUSED) {
@@ -861,8 +858,18 @@ static void poll_events(void)
                     fprintf(stderr, "[XR] %s profile %s\n", hand == LEFT ? "Left" : "Right", path);
             }
         } else if (event.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
-            xr.positioned = 0;
-            tsfp_projection_forget_geometry();
+            const XrEventDataReferenceSpaceChangePending *change =
+                (const XrEventDataReferenceSpaceChangePending *)&event;
+            const int applies = change->session == xr.session &&
+                change->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL;
+#ifndef TSFP_RELEASE
+            fprintf(stderr, "[XR-STEREO] Reference-space change before frame %u scene=%d type=%d invalidated=%d\n",
+                    stereo_diagnostic.frame + 1u, xr.world_scene, change->referenceSpaceType, applies);
+#endif
+            if (applies) {
+                xr.positioned = 0;
+                tsfp_projection_forget_geometry();
+            }
         } else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
             xr.running = 0;
         }
@@ -891,6 +898,18 @@ static void position_screen(void)
     xr.positioned = 1;
 }
 
+static void update_world_scene(int scene)
+{
+    if (scene == xr.world_scene)
+        return;
+    xr.world_scene = scene;
+    xr.stereo_committed = 0;
+#ifndef TSFP_RELEASE
+    stereo_diagnostic.missed = 0;
+#endif
+    tsfp_projection_forget_geometry();
+}
+
 /* Called under frame_lock. The world camera and present share this frame
  * state; only the first one reached can wait for and begin an XR frame. */
 static int open_frame(int early)
@@ -902,23 +921,28 @@ static int open_frame(int early)
         publish_pad((RecompPadState){0});
         return 0;
     }
-    XrFrameWaitInfo wait = { .type = XR_TYPE_FRAME_WAIT_INFO };
-    XrFrameBeginInfo begin = { .type = XR_TYPE_FRAME_BEGIN_INFO };
-    xr.frame = (XrFrameState){ .type = XR_TYPE_FRAME_STATE };
 #ifndef TSFP_RELEASE
     const uint64_t wait_started = SDL_GetTicksNS();
 #endif
-    const XrResult waited = xrWaitFrame(xr.session, &wait, &xr.frame);
+    const XrResult waited = recompvr_wait_frame(xr.session, &xr.frame);
 #ifndef TSFP_RELEASE
     frame_timing.xr_wait += SDL_GetTicksNS() - wait_started;
 #endif
-    if (!CHECK(waited) || !CHECK(xrBeginFrame(xr.session, &begin)))
+    if (!CHECK(waited) || !CHECK(recompvr_begin_frame(xr.session)))
         return 0;
     xr.frame_open = 1;
     xr.early_frame = early;
+#ifndef TSFP_RELEASE
+    ++stereo_diagnostic.frame;
+    stereo_diagnostic.source_ready = stereo_diagnostic.copy_recorded = 0;
+    stereo_diagnostic.early_acquire = 0;
+    stereo_diagnostic.wait_budget = 0;
+    tsfp_projection_reset_diagnostic();
+#endif
     tsfp_stereo_begin_frame();
     xr.eyes_valid = 0;
-    xr.wants_world = xr.world_active = xr.reuse_world = 0;
+    xr.world_active = xr.reuse_world = 0;
+    update_world_scene(geometry_requested && !geometry_disabled ? tsfp_stereo_world_scene() : -1);
     if (xr.frame.shouldRender) {
         position_screen();
         xr.eyes_valid = (projection_requested || (geometry_requested && !geometry_disabled)) && xr.positioned &&
@@ -937,8 +961,7 @@ static int open_frame(int early)
             xr.pose_ticks = SDL_GetTicksNS();
     }
     float game_projection[16];
-    sync_controls(geometry_requested && !geometry_disabled &&
-                  tsfp_stereo_world_projection(game_projection));
+    sync_controls(xr.world_scene >= 0 && tsfp_stereo_world_projection(game_projection));
     return 1;
 }
 
@@ -975,7 +998,8 @@ int tsfp_xr_world_matrices(float rows[32])
     XrMatrix4x4f game;
     const int have_camera = !geometry_disabled && tsfp_stereo_world_projection(game.m);
     int valid = have_camera && open_frame(1) && xr.eyes_valid;
-    xr.wants_world = have_camera;
+    if (have_camera)
+        update_world_scene(tsfp_stereo_world_scene());
     static int logged_pose, logged_lens;
     if (have_camera && !valid && !logged_pose) {
         logged_pose = 1;
@@ -993,6 +1017,16 @@ int tsfp_xr_world_matrices(float rows[32])
         }
     }
     xr.world_active = valid;
+    if (valid) {
+        /* Reserve the image when the game starts its stereo pass. Wait for
+         * write access at present, after the source frame has been rendered. */
+        const int acquired = tsfp_projection_acquire();
+#ifndef TSFP_RELEASE
+        stereo_diagnostic.early_acquire = acquired;
+#else
+        (void)acquired;
+#endif
+    }
     pthread_mutex_unlock(&frame_lock);
     return valid;
 }
@@ -1124,6 +1158,24 @@ int tsfp_xr_weapon_matrices(const float projection[16], float rows[32])
         eye_rows(rows, &game, &head, 4.0f, near_z * 4.0f, far_z * 4.0f);
 }
 
+static XrPosef touch_aim_pose(unsigned hand)
+{
+    XrPosef pose = xr.touch_pose[TOUCH_GRIP][hand];
+    pose.orientation = xr.touch_valid & (1u << (TOUCH_AIM * HANDS + hand)) ?
+        xr.touch_pose[TOUCH_AIM][hand].orientation : tsfp_touch_aim_from_grip(pose.orientation, hand);
+    return pose;
+}
+
+int tsfp_xr_hand_pose(unsigned hand, XrPosef *anchor, XrPosef *pose)
+{
+    /* Weapon simulation may run after xrEndFrame and before the next sample. */
+    if (!tsfp_xr_touch_tracked(hand))
+        return 0;
+    *anchor = xr.anchor;
+    *pose = touch_aim_pose(hand);
+    return 1;
+}
+
 unsigned tsfp_xr_avatar_poses(XrPosef *anchor, XrVector3f *body_offset,
                              XrPosef hands[TSFP_AVATAR_HANDS])
 {
@@ -1136,12 +1188,8 @@ unsigned tsfp_xr_avatar_poses(XrPosef *anchor, XrVector3f *body_offset,
     for (unsigned hand = 0; hand < HANDS; ++hand) {
         if (!(xr.touch_valid & (1u << (TOUCH_GRIP * HANDS + hand))))
             continue;
-        const unsigned bit = 1u << hand;
-        tracked |= bit;
-        hands[hand] = xr.touch_pose[TOUCH_GRIP][hand];
-        hands[hand].orientation = xr.touch_valid & (1u << (TOUCH_AIM * HANDS + hand)) ?
-            xr.touch_pose[TOUCH_AIM][hand].orientation :
-            tsfp_touch_aim_from_grip(hands[hand].orientation, hand);
+        tracked |= 1u << hand;
+        hands[hand] = touch_aim_pose(hand);
     }
     return tracked;
 }
@@ -1308,6 +1356,13 @@ int tsfp_xr_tracked_matrices(const float projection[16], TsfpModelRole role, flo
         eye_rows(rows, &game, &model, 1.0f, xr.world_near, xr.world_far);
 }
 
+static XrDuration stereo_image_wait(XrDuration display_period)
+{
+    /* Give the compositor one display interval to return a buffer even
+     * when a previous pair exists. An already writable image returns at once. */
+    return display_period > 0 ? SDL_min(display_period, 20000000) : 2000000;
+}
+
 VkImage tsfp_xr_begin_frame(int geometry_ready)
 {
     pthread_mutex_lock(&frame_lock);
@@ -1320,14 +1375,29 @@ VkImage tsfp_xr_begin_frame(int geometry_ready)
                             xr.eyes_valid ? xr.eyes : NULL, xr.frames);
     if (!xr.frame.shouldRender)
         return VK_NULL_HANDLE;
-    if (xr.eyes_valid && (projection_requested || (geometry_ready && xr.world_active)))
-        tsfp_projection_begin(xr.local, &xr.anchor, xr.eyes);
+    const int fresh_stereo = geometry_ready && xr.world_active;
+    const int cached_stereo = xr.world_scene >= 0 && tsfp_projection_has_geometry();
+    const int stereo_scene = xr.world_scene >= 0 && (fresh_stereo || xr.stereo_committed);
+    const XrDuration wait_budget = fresh_stereo ? stereo_image_wait(xr.frame.predictedDisplayPeriod) : 0;
+#ifndef TSFP_RELEASE
+    stereo_diagnostic.source_ready = geometry_ready;
+#endif
+    if (xr.eyes_valid && (projection_requested || fresh_stereo)) {
+#ifndef TSFP_RELEASE
+        stereo_diagnostic.wait_budget = wait_budget;
+#endif
+        tsfp_projection_begin(xr.local, &xr.anchor, xr.eyes, wait_budget);
+    }
     if (geometry_ready && tsfp_xr_geometry_image())
         return VK_NULL_HANDLE;
-    if (xr.wants_world && tsfp_projection_has_geometry()) {
+    /* Gameplay can miss the stereo render pass altogether. Keep the last
+     * complete pair from this scene instead of showing the mono back buffer. */
+    if (cached_stereo) {
         xr.reuse_world = 1;
         return VK_NULL_HANDLE;
     }
+    if (stereo_scene)
+        return VK_NULL_HANDLE;
 
     XrSwapchainImageAcquireInfo acquire = { .type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
     XrSwapchainImageWaitInfo image_wait = { .type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, .timeout = XR_INFINITE_DURATION };
@@ -1347,6 +1417,9 @@ VkImage tsfp_xr_geometry_image(void)
 void tsfp_xr_geometry_submitted(void)
 {
     tsfp_projection_geometry_submitted();
+#ifndef TSFP_RELEASE
+    stereo_diagnostic.copy_recorded = 1;
+#endif
 }
 
 void tsfp_xr_draw_projection(VkCommandBuffer commands)
@@ -1354,6 +1427,45 @@ void tsfp_xr_draw_projection(VkCommandBuffer commands)
     if (projection_requested)
         tsfp_projection_draw(commands);
 }
+
+#ifndef TSFP_RELEASE
+static void report_stereo_frame(int projection, unsigned layers, XrResult submitted)
+{
+    if (xr.world_scene < 0 || !xr.frame.shouldRender)
+        return;
+    const TsfpProjectionDiagnostic image = tsfp_projection_diagnostic();
+    if (XR_SUCCEEDED(submitted) && projection && stereo_diagnostic.copy_recorded && !xr.reuse_world) {
+        if (image.wait_ns >= 1000000u &&
+            (++stereo_diagnostic.waited_for_fresh <= 12u || stereo_diagnostic.waited_for_fresh % 120u == 0))
+            fprintf(stderr, "[XR-STEREO] Frame %u scene=%d fresh image after %.2fms wait (budget %.2fms early=%d)\n",
+                    stereo_diagnostic.frame, xr.world_scene, image.wait_ns / 1e6,
+                    stereo_diagnostic.wait_budget / 1e6, stereo_diagnostic.early_acquire);
+        if (stereo_diagnostic.missed) {
+            fprintf(stderr, "[XR-STEREO] Frame %u scene=%d fresh stereo restored after %u frames\n",
+                    stereo_diagnostic.frame, xr.world_scene, stereo_diagnostic.missed);
+            stereo_diagnostic.missed = 0;
+        }
+        return;
+    }
+    const uint32_t missed = ++stereo_diagnostic.missed;
+    if (missed > 8u && missed % 120u != 0)
+        return;
+
+    const char *outcome = "no-layer";
+    if (XR_FAILED(submitted))
+        outcome = "submit-error";
+    else if (projection)
+        outcome = xr.reuse_world ? "reused" : "projection";
+    else if (layers)
+        outcome = "mono";
+    fprintf(stderr, "[XR-STEREO] Frame %u scene=%d session=%d gap=%u outcome=%s "
+            "eyes=%d matrices=%d source=%d copy=%d early=%d image=%s xrResult=%d wait=%.2fms budget=%.2fms endFrame=%d\n",
+            stereo_diagnostic.frame, xr.world_scene, xr.state, missed, outcome,
+            xr.eyes_valid, xr.world_active, stereo_diagnostic.source_ready, stereo_diagnostic.copy_recorded,
+            stereo_diagnostic.early_acquire, image.stage, image.result, image.wait_ns / 1e6,
+            stereo_diagnostic.wait_budget / 1e6, submitted);
+}
+#endif
 
 int tsfp_xr_end_frame(void)
 {
@@ -1377,7 +1489,11 @@ int tsfp_xr_end_frame(void)
         end.layers = layers;
     xr.acquired = 0;
     xr.frame_open = 0;
-    if (!CHECK(xrEndFrame(xr.session, &end))) {
+    const XrResult submitted = xrEndFrame(xr.session, &end);
+#ifndef TSFP_RELEASE
+    report_stereo_frame(projection != NULL, end.layerCount, submitted);
+#endif
+    if (!CHECK(submitted)) {
         if (projection && end.layerCount) {
             projection_requested = 0;
             geometry_disabled = 1;
@@ -1386,6 +1502,8 @@ int tsfp_xr_end_frame(void)
         pthread_mutex_unlock(&frame_lock);
         return -1;
     }
+    if (projection && xr.world_active && !xr.reuse_world && xr.world_scene >= 0)
+        xr.stereo_committed = 1;
     if (projection && xr.reuse_world) {
         static unsigned reused_frames;
         if (++reused_frames == 1 || reused_frames % 300 == 0)
@@ -1400,6 +1518,22 @@ int tsfp_xr_end_frame(void)
         fprintf(stderr, "[XR] Submitted %s %u (%u layers)\n",
                 projection && (xr.world_active || xr.reuse_world) ? "game geometry" : "game quad",
                 xr.frames, end.layerCount);
+#ifndef TSFP_RELEASE
+    if (end.layerCount) {
+        static int last_scene = -1, last_stereo = -1;
+        static unsigned transitions;
+        const int stereo = projection && (xr.world_active || xr.reuse_world);
+        if (last_scene != xr.world_scene || last_stereo != stereo) {
+            if (transitions < 120u) {
+                ++transitions;
+                fprintf(stderr, "[XR-FRAME] Present %u scene=%d stereo=%d reuse=%d layers=%u\n",
+                        xr.frames, xr.world_scene, stereo, xr.reuse_world, end.layerCount);
+            }
+            last_scene = xr.world_scene;
+            last_stereo = stereo;
+        }
+    }
+#endif
     pthread_mutex_unlock(&frame_lock);
     return end.layerCount ? 0 : 1;
 }
@@ -1427,6 +1561,9 @@ void tsfp_xr_destroy(void)
     if (xr.instance) xrDestroyInstance(xr.instance);
     free(xr.images);
     memset(&xr, 0, sizeof xr);
+#ifndef TSFP_RELEASE
+    memset(&stereo_diagnostic, 0, sizeof stereo_diagnostic);
+#endif
     pthread_mutex_unlock(&frame_lock);
     publish_pad((RecompPadState){0});
 }

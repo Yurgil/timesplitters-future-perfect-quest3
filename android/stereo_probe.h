@@ -41,6 +41,7 @@ static inline int tsfp_model_role_on_body(TsfpModelRole role)
 int tsfp_xr_locate_stereo(XrSession session, XrSpace local, XrTime display_time,
                           XrView eyes[TSFP_XR_EYES]);
 int tsfp_stereo_world_projection(float projection[16]);
+int tsfp_stereo_world_scene(void);
 int tsfp_stereo_ghost_camera(TsfpGhostCamera *camera);
 const float *tsfp_stereo_weapon_projection(void);
 void tsfp_stereo_probe_enable(int enabled);
@@ -55,6 +56,7 @@ TsfpModelRole tsfp_stereo_model_role(void);
 int tsfp_stereo_weapon_depth_range(float *offset, float *scale);
 int tsfp_xr_tracked_matrices(const float projection[16], TsfpModelRole role, float rows[32]);
 int tsfp_xr_avatar_ready(void);
+int tsfp_xr_hand_pose(unsigned hand, XrPosef *anchor, XrPosef *pose);
 unsigned tsfp_xr_avatar_poses(XrPosef *anchor, XrVector3f *body_offset,
                              XrPosef hands[TSFP_AVATAR_HANDS]);
 int tsfp_xr_body_matrices(XrVector3f body_offset, float rows[32]);

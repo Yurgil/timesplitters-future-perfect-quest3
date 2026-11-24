@@ -4,6 +4,7 @@
 #include "pc_native_numeric.h"
 
 void tsfp_quest_projectile(void);
+void tsfp_quest_trace_projectile(void);
 void tsfp_quest_muzzle_flash(void);
 void tsfp_quest_muzzle_flash_position(void);
 void tsfp_quest_shot_effect_position(void);
@@ -17,6 +18,10 @@ void tsfp_quest_screen_effects(void);
 void tsfp_quest_story_screen_effects(void);
 void tsfp_quest_world_screen_effects(void);
 void tsfp_quest_late_screen_effects(void);
+void tsfp_quest_dispersion_impact(void);
+void tsfp_quest_time_grenade_effect(void);
+void tsfp_quest_mag_charger_shot(void);
+void tsfp_quest_mag_charger_vision(void);
 void tsfp_quest_ghost_actor(void);
 void tsfp_quest_ghost_reveal(void);
 void tsfp_quest_first_person_weapon_pass(void);
@@ -42,6 +47,11 @@ static inline __attribute__((always_inline)) TsfpGuestCallee tsfp_quest_guest_ca
     case 0x00086DE4u: return tsfp_quest_object_visibility;
     case 0x000A249Eu: return tsfp_quest_object_occlusion;
     case 0x001C0B97u: return tsfp_quest_projectile;
+#ifdef TSFP_TRACE_CART
+    case 0x001BC451u:
+    case 0x001BC876u:
+    case 0x002457C2u: return tsfp_quest_trace_projectile;
+#endif
     case 0x001B92B8u:
     case 0x001B92D1u: return tsfp_quest_muzzle_flash;
     case 0x001B86A2u:
@@ -59,6 +69,12 @@ static inline __attribute__((always_inline)) TsfpGuestCallee tsfp_quest_guest_ca
     case 0x001CED8Au: return tsfp_quest_story_screen_effects;
     case 0x001CEED0u: return tsfp_quest_world_screen_effects;
     case 0x001CE9A9u: return tsfp_quest_late_screen_effects;
+    case 0x000FECF0u:
+    case 0x000FED73u: return tsfp_quest_dispersion_impact;
+    case 0x000FECFEu:
+    case 0x000FED81u: return tsfp_quest_time_grenade_effect;
+    case 0x000FED98u: return tsfp_quest_mag_charger_shot;
+    case 0x0014D31Fu: return tsfp_quest_mag_charger_vision;
     case 0x00126421u: return tsfp_quest_ghost_actor;
     case 0x0012644Eu: return tsfp_quest_ghost_reveal;
     case 0x001CEEE8u: return tsfp_quest_first_person_weapon_pass;

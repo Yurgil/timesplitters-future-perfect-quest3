@@ -69,3 +69,8 @@ local.properties
 *.p12
 *.log
 *.tmp
+
+# Quest workspace and packaging files
+/build
+/captures
+._*

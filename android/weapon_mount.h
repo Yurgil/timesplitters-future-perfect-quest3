@@ -15,26 +15,35 @@ typedef struct {
 enum { TSFP_WEAPON_OFF_SLOT, TSFP_WEAPON_MAIN_SLOT };
 enum {
     TSFP_WEAPON_NO_STORY = -1,
+    TSFP_SCENE_MANSION = 1,
     TSFP_SCENE_TIME_TO_SPLIT = 2,
     TSFP_SCENE_SCOTLAND = 4,
+    TSFP_SCENE_BREAKING_AND_ENTERING = 6,
+    TSFP_SCENE_CATACOMBS = 17,
     TSFP_SCENE_RUSSIAN_CONNECTION = 18,
-    TSFP_SCENE_MANSION = 1
+    TSFP_SCENE_U_GENIX = 22
 };
 enum {
     TSFP_WEAPON_KRUGER = 1,
+    TSFP_WEAPON_LX18 = 2,
     TSFP_WEAPON_REVOLVER = 3,
     TSFP_WEAPON_FLARE_GUN = 4,
+    TSFP_WEAPON_DISPERSION_GUN = 6,
     TSFP_WEAPON_SNIPER_BOLT = 8,
     TSFP_WEAPON_SNIPER_RIFLE = 9,
     TSFP_WEAPON_FLAMETHROWER = 10,
+    TSFP_WEAPON_HARPOON = 11,
     TSFP_WEAPON_SOVIET_RIFLE = 12,
     TSFP_WEAPON_SCIFI_HANDGUN = 14,
     TSFP_WEAPON_FUTURE_SNIPER = 17,
     TSFP_WEAPON_PLASMA_MACHINE_GUN = 19,
+    TSFP_WEAPON_MAG_CHARGER = 20,
     TSFP_WEAPON_K_SMG = 30,
     TSFP_WEAPON_MACHINE_GUN = 31,
     TSFP_WEAPON_DOUBLE_BARREL = 32,
-    TSFP_WEAPON_BASEBALL_BAT = 33
+    TSFP_WEAPON_BASEBALL_BAT = 33,
+    TSFP_WEAPON_INJECTOR = 38,
+    TSFP_WEAPON_SBP500 = 39
 };
 
 /* Landmarks in the local coordinates of each Xbox XBR housing mesh. The
@@ -43,16 +52,16 @@ enum {
 static const TsfpWeaponProfile tsfp_weapon_profiles[] = {
     [0]  = { "pistol9mm_anim", 1, TSFP_WEAPON_GUN, {0,-.080f,-.035f}, {0,0,1}, {0,1,0}, {0,.060f,.301f} },
     [1]  = { "luger_anim", 1, TSFP_WEAPON_GUN, {0,-.115f,-.112f}, {0,0,1}, {0,1,0}, {0,.0353f,.2168f} },
-    [2]  = { "glock_anim", 1, TSFP_WEAPON_GUN, {0,-.079f,-.019f}, {0,0,1}, {0,1,0}, {0,.045f,.176f} },
+    [TSFP_WEAPON_LX18] = { "glock_anim", 1, TSFP_WEAPON_GUN, {0,-.079f,-.019f}, {0,0,1}, {0,1,0}, {0,.045f,.176f} },
     [3]  = { "magnum_anim", 1, TSFP_WEAPON_GUN, {0,-.106f,-.043f}, {0,0,1}, {0,1,0}, {0,.059f,.368f} },
     [4]  = { "flaregun_anim", 1, TSFP_WEAPON_GUN, {0,-.052f,0}, {.886f,-.464f,0}, {0,1,0}, {.407f,-.106f,0} },
     [5]  = { "assaultshotgun_anim", 1, TSFP_WEAPON_GUN, {0,-.099f,-.050f}, {0,0,1}, {0,1,0}, {0,.073f,.994f} },
-    [6]  = { "futureshotgun_anim", 1, TSFP_WEAPON_GUN, {0,-.096f,-.046f}, {0,0,1}, {0,1,0}, {0,.102f,.637f} },
+    [TSFP_WEAPON_DISPERSION_GUN] = { "futureshotgun_anim", 1, TSFP_WEAPON_GUN, {0,-.096f,-.046f}, {0,0,1}, {0,1,0}, {0,.102f,.637f} },
     [7]  = { "minigun_anim", 1, TSFP_WEAPON_GUN, {-.101f,.090f,-.079f}, {0,0,1}, {0,1,0}, {.006f,.042f,1.181f} },
     [TSFP_WEAPON_SNIPER_BOLT] = { "sniperbolt_anim", 1, TSFP_WEAPON_GUN, {-.317f,0,-.101f}, {1,0,0}, {0,0,1}, {.6507f,0,0} },
     [TSFP_WEAPON_SNIPER_RIFLE] = { "sniperrifle_anim", 1, TSFP_WEAPON_GUN, {-.281f,0,-.094f}, {1,0,0}, {0,0,1}, {.6507f,0,0} },
     [TSFP_WEAPON_FLAMETHROWER] = { "flamethrower_anim", 1, TSFP_WEAPON_GUN, {0,-.042f,-.062f}, {0,0,-1}, {0,-1,0}, {0,.003f,-.835f} },
-    [11] = { "harpoon_anim", 1, TSFP_WEAPON_GUN, {0,-.103f,.086f}, {0,0,1}, {0,1,0}, {0,.070f,.563f} },
+    [TSFP_WEAPON_HARPOON] = { "harpoon_anim", 1, TSFP_WEAPON_GUN, {0,-.103f,.086f}, {0,0,1}, {0,1,0}, {0,.070f,.563f} },
     [12] = { "assaultrifle_anim", 1, TSFP_WEAPON_GUN, {0,-.140f,.093f}, {0,0,1}, {0,1,0}, {0,-.0111f,1.3223f} },
     [13] = { "electrogun_anim", 1, TSFP_WEAPON_GUN, {0,-.135f,-.025f}, {0,0,1}, {0,1,0}, {0,-.024f,.638f} },
     [TSFP_WEAPON_SCIFI_HANDGUN] = { "scifihandgun_anim", 1, TSFP_WEAPON_GUN, {-.030f,-.045f,-.068f}, {0,0,1}, {0,1,0}, {0,.0743f,.4822f} },
@@ -61,7 +70,7 @@ static const TsfpWeaponProfile tsfp_weapon_profiles[] = {
     [TSFP_WEAPON_FUTURE_SNIPER] = { "fsniper_anim", 1, TSFP_WEAPON_GUN, {-.035f,-.052f,.025f}, {0,0,1}, {0,1,0}, {0,.0501f,1.1209f} },
     [18] = { "ghostgun_anim", 1, TSFP_WEAPON_GUN, {.059f,-.141f,-.125f}, {0,0,1}, {0,1,0}, {0,-.022f,.765f} },
     [TSFP_WEAPON_PLASMA_MACHINE_GUN] = { "plasmamachinegun_anim", 1, TSFP_WEAPON_GUN, {-.030f,-.150f,.061f}, {0,0,1}, {0,1,0}, {0,.043f,.954f} },
-    [20] = { "magcharger_anim", 1, TSFP_WEAPON_GUN, {0,-.061f,.010f}, {0,0,1}, {0,1,0}, {0,-.007f,.282f} },
+    [TSFP_WEAPON_MAG_CHARGER] = { "magcharger_anim", 1, TSFP_WEAPON_GUN, {0,-.061f,.010f}, {0,0,1}, {0,1,0}, {0,-.007f,.282f} },
     [21] = { "monkeygun_anim", 1, TSFP_WEAPON_GUN, {0,-.069f,.014f}, {0,0,1}, {0,1,0}, {0,-.007f,.282f} },
     [22] = { "grenade_cl", 0, TSFP_WEAPON_PROP, {0,.002f,-.010f}, {0,0,1}, {0,1,0}, {0} },
     [23] = { "grenade_cl", 0, TSFP_WEAPON_PROP, {0,.014f,-.010f}, {0,0,1}, {0,1,0}, {0} },
@@ -79,8 +88,8 @@ static const TsfpWeaponProfile tsfp_weapon_profiles[] = {
     /* The wrist opening is at the positive-X end of the housing. */
     [36] = { "mapboy_anim", 1, TSFP_WEAPON_CUFF, {.087f,0,.0004f}, {1,0,0}, {0,1,0}, {0} },
     [37] = { "mapboy_anim", 1, TSFP_WEAPON_CUFF, {.087f,0,.0004f}, {1,0,0}, {0,1,0}, {0} },
-    [38] = { "dartgun_anim", 1, TSFP_WEAPON_GUN, {0,-.072f,-.175f}, {0,0,1}, {0,1,0}, {0,.068f,.341f} },
-    [39] = { "sbp500_anim", 1, TSFP_WEAPON_GUN, {-.145f,-.038f,0}, {1,0,0}, {0,1,0}, {1.038f,.005f,-.002f} },
+    [TSFP_WEAPON_INJECTOR] = { "dartgun_anim", 1, TSFP_WEAPON_GUN, {0,-.072f,-.175f}, {0,0,1}, {0,1,0}, {0,.068f,.341f} },
+    [TSFP_WEAPON_SBP500] = { "sbp500_anim", 1, TSFP_WEAPON_GUN, {-.145f,-.038f,0}, {1,0,0}, {0,1,0}, {1.038f,.005f,-.002f} },
     [62] = { "machinepistol_anim", 1, TSFP_WEAPON_GUN, {0,-.140f,-.018f}, {0,0,1}, {0,1,0}, {0,.003f,.531f} },
 };
 
@@ -116,13 +125,17 @@ static inline int tsfp_weapon_target(uint32_t id, unsigned hand, int story_scene
     if (!profile)
         return 0;
     const int story = story_scene != TSFP_WEAPON_NO_STORY;
+    const int u_genix = story_scene == TSFP_SCENE_BREAKING_AND_ENTERING || story_scene == TSFP_SCENE_U_GENIX;
 
     const XrVector3f aim_forward = {0,0,-1}, aim_up = {0,-1,0};
     XrVector3f forward, up;
     XrQuaternionf_RotateVector3f(&forward, &aim, &aim_forward);
     XrQuaternionf_RotateVector3f(&up, &aim, &aim_up);
+    XrVector3f model_up = profile->up;
+    if (u_genix && id == TSFP_WEAPON_SBP500)
+        model_up = (XrVector3f){-model_up.x, -model_up.y, -model_up.z};
     XrMatrix4x4f model_basis, hand_basis, from_model_basis;
-    if (!tsfp_weapon_basis(&model_basis, profile->forward, profile->up) ||
+    if (!tsfp_weapon_basis(&model_basis, profile->forward, model_up) ||
         !tsfp_weapon_basis(&hand_basis, forward, up))
         return 0;
     XrMatrix4x4f_InvertRigidBody(&from_model_basis, &model_basis);
@@ -168,6 +181,23 @@ static inline int tsfp_weapon_target(uint32_t id, unsigned hand, int story_scene
         placement = (XrVector3f){.060f, 0, .180f};
     if (story_scene == TSFP_SCENE_RUSSIAN_CONNECTION && id == TSFP_WEAPON_MACHINE_GUN)
         placement.z += .080f;
+    if ((story_scene == TSFP_SCENE_MANSION || story_scene == TSFP_SCENE_CATACOMBS) &&
+        id == TSFP_WEAPON_DOUBLE_BARREL)
+        placement.z += .060f;
+    if (story_scene == TSFP_SCENE_CATACOMBS && id == TSFP_WEAPON_HARPOON)
+        placement.z += .180f;
+    if (story_scene == TSFP_SCENE_BREAKING_AND_ENTERING) {
+        switch (id) {
+        case TSFP_WEAPON_LX18: placement = (XrVector3f){.040f, -.060f, .045f}; break;
+        case TSFP_WEAPON_MAG_CHARGER: placement = (XrVector3f){.030f, .020f, .145f}; break;
+        }
+    }
+    if (u_genix && id == TSFP_WEAPON_SBP500)
+        placement = (XrVector3f){0, .070f, .015f};
+    if (u_genix && id == TSFP_WEAPON_DISPERSION_GUN)
+        placement = (XrVector3f){.030f, -.070f, .085f};
+    if (story_scene == TSFP_SCENE_U_GENIX && id == TSFP_WEAPON_INJECTOR)
+        placement = (XrVector3f){.030f, 0, .075f};
     if (story_scene == TSFP_SCENE_MANSION) {
         if (id == TSFP_WEAPON_FLAMETHROWER)
             placement = (XrVector3f){.030f, .150f, .160f};

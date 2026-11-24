@@ -1,0 +1,70 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -5042,6 +5042,13 @@
+            tsfp_vk_stereo_snapshot_extent(width, height);
+ }
+ 
++int tsfp_vk_mag_charger_extent(uint32_t *width, uint32_t *height)
++{
++    return V.xr_ghost_eye &&
++           tsfp_stereo_screen_effect_draw() == TSFP_MAG_CHARGER_VISION_ROUTINE &&
++           tsfp_vk_stereo_snapshot_extent(width, height);
++}
++
+ int tsfp_vk_stereo_snapshot(RhiImage *destination)
+ {
+     RhiImage *source = V.xr_world_color;
+--- a/src/hle/hle_d3d8_record.c
++++ b/src/hle/hle_d3d8_record.c
+@@ -1683,17 +1683,40 @@
+             if (FAILED(hr)) return hr;
+         }
+ #elif defined(__ANDROID__)
+-        UINT width, height;
+-        D3DSURFACE_DESC depth_desc;
+-        if (level == 0 && tsfp_vk_stereo_geometry() &&
+-            d3d8_base_size(texture, &width, &height) &&
+-            width == d3d8_GetGuestWidth() && height == d3d8_GetGuestHeight()) {
+-            if (depth && SUCCEEDED(depth->lpVtbl->GetDesc(depth, &depth_desc)) &&
+-                (depth_desc.Width != width || depth_desc.Height != height)) {
+-                hr = xbox_D3D8PrepareSharedDepthTarget(t, depth);
+-                if (FAILED(hr)) return hr;
+-            } else if (!depth && tsfp_vk_stereo_effect_extent(&width, &height)) {
+-                d3d8_ResizeRenderTexture((D3D8Texture *)t, width, height, TRUE);
++        UINT width, height, eye_width, eye_height;
++        const UINT guest_width = d3d8_GetGuestWidth(), guest_height = d3d8_GetGuestHeight();
++        if (level == 0 && d3d8_base_size(texture, &width, &height)) {
++            if (width == guest_width && height == guest_height && tsfp_vk_stereo_geometry()) {
++                D3DSURFACE_DESC depth_desc;
++                if (depth && SUCCEEDED(depth->lpVtbl->GetDesc(depth, &depth_desc)) &&
++                    (depth_desc.Width != width || depth_desc.Height != height)) {
++                    hr = xbox_D3D8PrepareSharedDepthTarget(t, depth);
++                    if (FAILED(hr)) return hr;
++                } else if (!depth && tsfp_vk_stereo_effect_extent(&eye_width, &eye_height)) {
++                    d3d8_ResizeRenderTexture((D3D8Texture *)t, eye_width, eye_height, TRUE);
++                }
++            } else if ((width == guest_width / 2 && height == guest_height / 2) ||
++                       (width == guest_width / 4 && height == guest_height / 4)) {
++                /* Vision filters a scene snapshot into the game's half-size
++                 * (quarter-size in split screen) target with 2D quads.
++                 * Keep logical dimensions for Xbox viewport and texture UVs. */
++                if (tsfp_vk_mag_charger_extent(&eye_width, &eye_height)) {
++                    if (SUCCEEDED(d3d8_ResizeRenderTexture((D3D8Texture *)t, eye_width, eye_height, TRUE))) {
++                        depth = NULL;
++#ifndef TSFP_RELEASE
++                        static int reported;
++                        if (!reported) {
++                            reported = 1;
++                            fprintf(stderr, "[XR-FX] Mag-Charger scratch %ux%u -> %ux%u per eye\n",
++                                    width, height, eye_width, eye_height);
++                        }
++#endif
++                    }
++                } else {
++                    /* The title shares this target with other effects. */
++                    hr = d3d8_ResizeRenderTexture((D3D8Texture *)t, width, height, TRUE);
++                    if (FAILED(hr)) return hr;
++                }
+             }
+         }
+ #endif

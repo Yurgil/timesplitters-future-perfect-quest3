@@ -1,0 +1,3 @@
+[submodule "external/RecompVR"]
+	path = external/RecompVR
+	url = https://github.com/Yurgil/RecompVR.git

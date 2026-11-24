@@ -1,4 +1,5 @@
 #include "stereo_probe.h"
+#include <recompvr/openxr.h>
 #include "avatar_pose.h"
 #include "sniper_scope.h"
 #include "stereo_backend.h"
@@ -22,7 +23,7 @@ static _Thread_local struct {
     const uint8_t *body_nodes, *active_header;
     uint8_t *camera_palette;
     const void *world_projection, *active_projection;
-    unsigned body_count, matrix_count, head, posed_hands, wrist_valid;
+    unsigned body_count, matrix_count, head, view, posed_hands, wrist_valid;
     int rig_supported, rig_sided, pose_prepared, palette_patched;
     XrVector3f body_offset, camera_room_offset;
     TsfpAvatarArm rig[TSFP_AVATAR_HANDS];
@@ -67,6 +68,7 @@ static _Thread_local struct {
 
 enum { TSFP_OFF_HAND_SLOT = TSFP_WEAPON_OFF_SLOT, TSFP_MAIN_HAND_SLOT = TSFP_WEAPON_MAIN_SLOT };
 enum { TSFP_PLAYER_OFF_HAND = 0x184, TSFP_PLAYER_MAIN_HAND = 0x55c };
+enum { TSFP_CAMERA_VEHICLE = 0x400u };
 static const unsigned player_hand_state[] = { TSFP_PLAYER_OFF_HAND, TSFP_PLAYER_MAIN_HAND };
 static _Thread_local struct {
     const void *active_projection;
@@ -96,6 +98,7 @@ static _Thread_local struct {
 } held;
 static _Thread_local uint32_t object_cull_avatar[1 + TSFP_AVATAR_HANDS];
 static const uint8_t *entity_from_handle(const tsfp_guest_vm *vm, uint32_t handle, uint32_t bytes);
+static int catacombs_rider(const tsfp_guest_vm *vm, const uint8_t *player);
 
 void tsfp_stereo_probe_enable(int probe)
 {
@@ -204,17 +207,29 @@ static void identify_viewmodels(const tsfp_guest_vm *vm, const uint8_t *player)
     }
 }
 
+static int world_scene(const tsfp_guest_vm *vm)
+{
+    /* Known US fields for active local gameplay, used by the PC adapters. */
+    const uint32_t scene = guest_word(vm, 0x0079094Cu);
+    if (scene > 100u || guest_word(vm, 0x00790950u) != 1u ||
+        (guest_word(vm, 0x007DE458u) & 0x20000000u))
+        return -1;
+    const uint32_t pause = guest_word(vm, 0x00761C48u);
+    return pause && (guest_word(vm, pause) & 1u) ? -1 : (int)scene;
+}
+
+int tsfp_stereo_world_scene(void)
+{
+    tsfp_guest_vm vm;
+    xbox_GetGuestVirtualMemory(&vm);
+    return world_scene(&vm);
+}
+
 int tsfp_stereo_world_projection(float out[16])
 {
     tsfp_guest_vm vm;
     xbox_GetGuestVirtualMemory(&vm);
-    /* Known US fields for active local gameplay, used by the PC adapters. */
-    const uint32_t scene = guest_word(&vm, 0x0079094Cu);
-    if (scene > 100u || guest_word(&vm, 0x00790950u) != 1u ||
-        (guest_word(&vm, 0x007DE458u) & 0x20000000u))
-        return 0;
-    const uint32_t pause = guest_word(&vm, 0x00761C48u);
-    if (pause && (guest_word(&vm, pause) & 1u))
+    if (world_scene(&vm) < 0)
         return 0;
     const uint32_t camera_address = guest_word(&vm, 0x007B0CC0u);
     const unsigned char *camera = vm.resolve(vm.host, camera_address, 0x208u, 0);
@@ -265,7 +280,7 @@ void *tsfp_stereo_begin_visibility(float saved[16], int objects)
     if (!camera || !player || word(player + 8u) != address || word(camera + 0x214u) != 0)
         return NULL;
     const uint32_t mode = word(player + 0x114u);
-    if (mode != 2u && mode != 4u && mode != 0x800u)
+    if (mode != 2u && mode != 4u && mode != 0x800u && !catacombs_rider(&vm, player))
         return NULL;
     const float *view = vm.resolve(vm.host, word(camera + 0x208u), 16 * sizeof(float), 0);
     void *view_projection = vm.resolve(vm.host, word(camera + 0x20cu), 16 * sizeof(float), 1);
@@ -402,7 +417,8 @@ int tsfp_stereo_avatar_after_cull(uint32_t entity)
     xbox_GetGuestVirtualMemory(&vm);
     const uint32_t player_addr = guest_word(&vm, 0x007B0C7Cu);
     const uint8_t *player = local_player(&vm, player_addr);
-    if (!player || word(player + 0x14u) != entity || word(player + 0x114u) != 2)
+    if (!player || word(player + 0x14u) != entity ||
+        (word(player + 0x114u) != 2u && !catacombs_rider(&vm, player)))
         return 0;
     const uint32_t camera = word(player + 8);
     if (!camera || camera != guest_word(&vm, 0x007B0CC0u))
@@ -428,6 +444,7 @@ int tsfp_stereo_avatar_after_cull(uint32_t entity)
         return 0;
 
     avatar.body = body_model;
+    avatar.view = view_index;
     avatar.active_header = header;
     avatar.world_projection = world_lens;
     avatar.active_projection = active_lens;
@@ -642,8 +659,6 @@ static void move_held_weapon(unsigned hand, unsigned source_hand)
 
 static void prepare_avatar_pose(uint32_t view)
 {
-    XrPosef anchor, hands[TSFP_AVATAR_HANDS];
-    const unsigned tracked = tsfp_xr_avatar_poses(&anchor, &avatar.body_offset, hands);
     if (!avatar.rig_supported || view >= 4) {
         report_pose_failure(0);
         return;
@@ -651,8 +666,13 @@ static void prepare_avatar_pose(uint32_t view)
 
     tsfp_guest_vm vm;
     xbox_GetGuestVirtualMemory(&vm);
-    /* sub_A1B80 builds the view's composed palette before sub_18EA90
-     * draws the first node. The renderer reads this cache, not model+0x10. */
+    const uint32_t entity = guest_word(&vm, avatar.body);
+    /* A1B80 sets the entity's view bit when it builds the composed palette.
+     * A held model may draw before the body, while its cache still points
+     * into the previous frame's arena. Retry when the body actually draws. */
+    if (!entity || !(guest_word(&vm, entity + 0x14u) & (1u << view)) ||
+        word(avatar.active_header) != avatar.header || !tsfp_xr_avatar_ready())
+        return;
     const uint32_t cache = guest_word(&vm, avatar.body + 0x20u + view * 4u);
     avatar.camera_palette = cache && cache != guest_word(&vm, avatar.body + 0x10u) ?
         vm.resolve(vm.host, cache, avatar.matrix_count * sizeof(XrMatrix4x4f), 1) : NULL;
@@ -660,6 +680,10 @@ static void prepare_avatar_pose(uint32_t view)
         report_pose_failure(1);
         return;
     }
+    avatar.pose_prepared = 1;
+
+    XrPosef anchor, hands[TSFP_AVATAR_HANDS];
+    const unsigned tracked = tsfp_xr_avatar_poses(&anchor, &avatar.body_offset, hands);
     if (!avatar.rig_sided) {
         orient_body_rig();
         avatar.rig_sided = 1;
@@ -672,7 +696,6 @@ static void prepare_avatar_pose(uint32_t view)
     XrPosef camera_from_local;
     XrPosef_Invert(&camera_from_local, &anchor);
     XrQuaternionf_RotateVector3f(&avatar.camera_room_offset, &camera_from_local.orientation, &avatar.body_offset);
-    const uint32_t entity = guest_word(&vm, avatar.body);
     if (!kept.hand_holds_loaded)
         load_hand_holds();
 
@@ -817,16 +840,22 @@ static int story_weapon_scene(const tsfp_guest_vm *vm)
     return mode == 4u || mode == 14u ? (int)guest_word(vm, 0x0079094Cu) : TSFP_WEAPON_NO_STORY;
 }
 
+static int catacombs_rider(const tsfp_guest_vm *vm, const uint8_t *player)
+{
+    return word(player + 0x114u) == TSFP_CAMERA_VEHICLE &&
+        story_weapon_scene(vm) == TSFP_SCENE_CATACOMBS && !tsfp_stereo_mounted_gun();
+}
+
 static int tracked_weapon_target(uint32_t id, unsigned hand, int story_scene, XrMatrix4x4f *target)
 {
-    XrPosef anchor, hands[TSFP_AVATAR_HANDS], camera_from_local;
-    XrVector3f room, wrist;
+    XrPosef anchor, pose, camera_from_local;
+    XrVector3f wrist;
     XrQuaternionf aim;
-    if (!(tsfp_xr_avatar_poses(&anchor, &room, hands) & (1u << hand)))
+    if (!tsfp_xr_hand_pose(hand, &anchor, &pose))
         return 0;
     XrPosef_Invert(&camera_from_local, &anchor);
-    XrPosef_TransformVector3f(&wrist, &camera_from_local, &hands[hand].position);
-    XrQuaternionf_Multiply(&aim, &hands[hand].orientation, &camera_from_local.orientation);
+    XrPosef_TransformVector3f(&wrist, &camera_from_local, &pose.position);
+    XrQuaternionf_Multiply(&aim, &pose.orientation, &camera_from_local.orientation);
     return tsfp_weapon_target(id, hand, story_scene, wrist, aim, target);
 }
 
@@ -1031,6 +1060,21 @@ static const uint8_t *first_person_player(const tsfp_guest_vm *vm)
     return player && word(player + 0x114u) == 2 ? player : NULL;
 }
 
+static const uint8_t *handheld_weapon_player(const tsfp_guest_vm *vm)
+{
+    const uint8_t *player = local_player(vm, guest_word(vm, 0x007B0C7Cu));
+    if (!player)
+        return NULL;
+    const uint32_t mode = word(player + 0x114u);
+    if (mode == 2u)
+        return player;
+    /* The catacombs let the rider fire the player's own weapon. Preserve
+     * the original aim of fixed guns and of other vehicle sequences. */
+    if (catacombs_rider(vm, player))
+        return player;
+    return NULL;
+}
+
 uint32_t tsfp_stereo_scope_weapon(unsigned *hand)
 {
     tsfp_guest_vm vm;
@@ -1129,6 +1173,33 @@ static int current_weapon_bore(unsigned slot, uint32_t entity, uint32_t weapon_i
     return entity && kept.shots[slot].entity == entity && kept.shots[slot].weapon == weapon_id &&
         kept.frame - kept.shots[slot].frame <= TSFP_SHOT_POSE_FRAMES &&
         tsfp_xr_touch_tracked(kept.slot_hand[slot]);
+}
+
+static int camera_shot_bore(const tsfp_guest_vm *vm, const uint8_t *player, unsigned slot,
+                           uint32_t id, XrVector3f *muzzle, XrVector3f *direction)
+{
+    if (current_weapon_bore(slot, word(player + 0x14u), id)) {
+        *muzzle = kept.shots[slot].muzzle;
+        *direction = kept.shots[slot].direction;
+        return kept.slot_hand[slot];
+    }
+
+    /* Simulation can fire before this frame's viewmodel draw, including
+     * when boarding the cart. Use the same mount as a body-less viewmodel. */
+    const TsfpWeaponProfile *profile = tsfp_weapon_profile(id);
+    const int scene = story_weapon_scene(vm);
+    if (scene != TSFP_SCENE_CATACOMBS || !profile || profile->mount != TSFP_WEAPON_GUN ||
+        word(player + player_hand_state[slot] + 0x30u) != id ||
+        !render_model(vm, word(player + player_hand_state[slot] + 0x54u)))
+        return -1;
+    const unsigned main_state = player_hand_state[TSFP_MAIN_HAND_SLOT];
+    const unsigned hand = tsfp_weapon_hand(slot, word(player + main_state + 0x30u) != UINT32_MAX &&
+                                          render_model(vm, word(player + main_state + 0x54u)));
+    XrMatrix4x4f target;
+    if (!tracked_weapon_target(id, hand, scene, &target))
+        return -1;
+    tsfp_weapon_bore(profile, &target, muzzle, direction);
+    return hand;
 }
 
 int tsfp_stereo_weapon_effect_attachment(TsfpModelRole role, XrVector3f *body_offset,
@@ -1233,7 +1304,7 @@ TsfpModelRole tsfp_stereo_weapon_particles(uint32_t emitter)
     const uint32_t owner = word(effect + 0x88u);
     if (!in_camera && !owner)
         return TSFP_MODEL_DEFAULT;
-    const uint8_t *player = first_person_player(&vm);
+    const uint8_t *player = handheld_weapon_player(&vm);
     if (!player)
         return TSFP_MODEL_DEFAULT;
     const uint32_t entity = word(player + 0x14u);
@@ -1595,7 +1666,7 @@ void tsfp_stereo_flash_position(uint32_t record, uint32_t output, int shot_effec
     tsfp_guest_vm vm;
     xbox_GetGuestVirtualMemory(&vm);
     const uint32_t player_address = guest_word(&vm, 0x007B0C7Cu);
-    const uint8_t *player = first_person_player(&vm);
+    const uint8_t *player = handheld_weapon_player(&vm);
     if (!player)
         return;
     const uint32_t entity = word(player + 0x14u);
@@ -1609,8 +1680,9 @@ void tsfp_stereo_flash_position(uint32_t record, uint32_t output, int shot_effec
     const unsigned state = player_hand_state[slot];
     const uint32_t id = word(player + state + 0x30u);
     const int has_weapon_particles = tsfp_weapon_profile(id) != NULL;
+    XrVector3f camera_muzzle, camera_direction;
     if (!(has_weapon_particles || (!shot_effect && tsfp_stereo_weapon_projection())) ||
-        !current_weapon_bore((unsigned)slot, entity, id))
+        camera_shot_bore(&vm, player, (unsigned)slot, id, &camera_muzzle, &camera_direction) < 0)
         return;
     XrMatrix4x4f view, inverse;
     if (!read_camera_view(&vm, player, &view))
@@ -1620,10 +1692,66 @@ void tsfp_stereo_flash_position(uint32_t record, uint32_t output, int shot_effec
         return;
     XrMatrix4x4f_Invert(&inverse, &view);
     XrVector3f muzzle, direction;
-    tsfp_weapon_world_bore(&inverse, kept.shots[slot].muzzle, kept.shots[slot].direction,
-                           &muzzle, &direction);
+    tsfp_weapon_world_bore(&inverse, camera_muzzle, camera_direction, &muzzle, &direction);
     memcpy(position, &muzzle, sizeof muzzle);
 }
+
+#ifndef TSFP_RELEASE
+void tsfp_stereo_trace_lines(uint32_t stack, uint32_t shader, int programmable,
+                             uint32_t count, const void *vertices, uint32_t stride)
+{
+    tsfp_guest_vm vm;
+    xbox_GetGuestVirtualMemory(&vm);
+    if (story_weapon_scene(&vm) != TSFP_SCENE_CATACOMBS || !tsfp_xr_world_active())
+        return;
+    static uint64_t reported[32];
+    const uint32_t caller = guest_word(&vm, stack);
+    const uint64_t key = ((uint64_t)caller << 32) | shader;
+    for (unsigned i = 0; i < sizeof reported / sizeof reported[0]; ++i) {
+        if (key == reported[i])
+            return;
+        if (reported[i])
+            continue;
+        reported[i] = key;
+        float position[4] = {0};
+        memcpy(position, vertices, stride < sizeof position ? stride : sizeof position);
+        fprintf(stderr, "[M6] lines from=%08x shader=%08x program=%d count=%u stride=%u first=%g,%g,%g,%g\n",
+                caller, shader, programmable, count, stride, position[0], position[1], position[2], position[3]);
+        return;
+    }
+}
+
+void tsfp_stereo_trace_projectile(uint32_t stack)
+{
+    tsfp_guest_vm vm;
+    xbox_GetGuestVirtualMemory(&vm);
+    if (story_weapon_scene(&vm) != TSFP_SCENE_CATACOMBS)
+        return;
+    const uint8_t *player = local_player(&vm, guest_word(&vm, 0x007B0C7Cu));
+    const uint8_t *args = vm.resolve(vm.host, stack, 14u * sizeof(uint32_t), 0);
+    if (!player || !args)
+        return;
+    const uint32_t entity = word(player + 0x14u);
+    const uint32_t actor = entity ? guest_word(&vm, entity + 0x7cu) : 0;
+    if (!actor || (word(args + 4u) != entity && word(args + 0x30u) != actor))
+        return;
+    static uint32_t last_mode, last_site;
+    static unsigned samples;
+    const uint32_t mode = word(player + 0x114u), site = word(args);
+    if (last_mode != mode || last_site != site)
+        samples = 0;
+    last_mode = mode;
+    last_site = site;
+    if (samples >= 8)
+        return;
+    ++samples;
+    const uint32_t hand_record = word(args + 8u);
+    fprintf(stderr, "[M6] shot from=%08x mode=%x rider=%d shooter=%08x player=%08x "
+                    "record=%08x id=%u cart=%08x\n", site, mode, catacombs_rider(&vm, player),
+            word(args + 4u), entity, hand_record, guest_word(&vm, hand_record + 0x30u),
+            guest_word(&vm, actor + 0xc08u));
+}
+#endif
 
 /* 1C0200 calls 1B7680 with six pointers to its own position and direction
  * vectors. These copies feed the collision ray, projectile and tracer. */
@@ -1634,7 +1762,7 @@ void tsfp_stereo_redirect_projectile(uint32_t stack, uint32_t hand_record)
     tsfp_guest_vm vm;
     xbox_GetGuestVirtualMemory(&vm);
     const uint32_t player_address = guest_word(&vm, 0x007B0C7Cu);
-    const uint8_t *player = first_person_player(&vm);
+    const uint8_t *player = handheld_weapon_player(&vm);
     const uint8_t *args = vm.resolve(vm.host, stack, 14u * sizeof(uint32_t), 0);
     if (!player || !args)
         return;
@@ -1651,11 +1779,13 @@ void tsfp_stereo_redirect_projectile(uint32_t stack, uint32_t hand_record)
         slot = actor_hand_slot(&vm, entity, weapon_record);
     if (slot < 0 || !weapon_record)
         return;
-    const unsigned hand = kept.slot_hand[slot];
     const uint32_t weapon_id = guest_word(&vm, weapon_record + 0x30u);
-    const int mounted = current_weapon_bore((unsigned)slot, entity, weapon_id);
-    if (!tsfp_xr_touch_tracked(hand) || (!mounted &&
-        (kept.hand_move_entity[hand] != entity || kept.frame - kept.hand_move_frame[hand] > TSFP_SHOT_POSE_FRAMES))) {
+    XrVector3f camera_muzzle, camera_direction;
+    const int bore_hand = camera_shot_bore(&vm, player, (unsigned)slot, weapon_id, &camera_muzzle, &camera_direction);
+    const unsigned hand = bore_hand >= 0 ? (unsigned)bore_hand : kept.slot_hand[slot];
+    if (bore_hand < 0 && (!tsfp_xr_touch_tracked(hand) ||
+        (word(player + 0x114u) != 2u || kept.hand_move_entity[hand] != entity ||
+         kept.frame - kept.hand_move_frame[hand] > TSFP_SHOT_POSE_FRAMES))) {
         static unsigned reported;
         if (reported++ < 4u)
             fprintf(stderr, "[6DoF] Projectile has no current pose for the %s hand\n", hand_names[hand]);
@@ -1689,10 +1819,9 @@ void tsfp_stereo_redirect_projectile(uint32_t stack, uint32_t hand_record)
 
     XrMatrix4x4f_Invert(&world_from_camera, &camera_from_world);
     XrVector3f muzzle;
-    if (mounted) {
+    if (bore_hand >= 0) {
         XrVector3f direction;
-        tsfp_weapon_world_bore(&world_from_camera, kept.shots[slot].muzzle, kept.shots[slot].direction,
-                               &muzzle, &direction);
+        tsfp_weapon_world_bore(&world_from_camera, camera_muzzle, camera_direction, &muzzle, &direction);
         tsfp_weapon_aim_shot(direction, &values[RAY]);
     } else {
         XrMatrix4x4f moved_camera, move;
@@ -1724,8 +1853,8 @@ void tsfp_stereo_redirect_projectile(uint32_t stack, uint32_t hand_record)
 #endif
     if (reported < 12u) {
         ++reported;
-        fprintf(stderr, "[6DoF] Projectile from %s hand: muzzle %.3f %.3f %.3f, ray %.3f %.3f %.3f\n",
-                hand_names[hand], muzzle.x, muzzle.y, muzzle.z,
+        fprintf(stderr, "[6DoF] Projectile from %s hand in mode %#x: muzzle %.3f %.3f %.3f, ray %.3f %.3f %.3f\n",
+                hand_names[hand], word(player + 0x114u), muzzle.x, muzzle.y, muzzle.z,
                 values[RAY].x, values[RAY].y, values[RAY].z);
     }
 }
@@ -1733,12 +1862,12 @@ void tsfp_stereo_redirect_projectile(uint32_t stack, uint32_t hand_record)
 int tsfp_stereo_flash_begin(uint32_t stack)
 {
     const TsfpModelRole previous = avatar.role;
-    if (!tsfp_stereo_weapon_projection() || !tsfp_stereo_immersive_player())
+    if (!tsfp_stereo_weapon_projection() || !tsfp_xr_world_active())
         return previous;
     tsfp_guest_vm vm;
     xbox_GetGuestVirtualMemory(&vm);
     const uint32_t player_address = guest_word(&vm, 0x007B0C7Cu);
-    const uint8_t *player = first_person_player(&vm);
+    const uint8_t *player = handheld_weapon_player(&vm);
     const uint32_t record = guest_word(&vm, stack + 8u);
     const int slot = player ? actor_hand_slot(&vm, word(player + 0x14u), record) : -1;
     if (slot >= 0) {
@@ -1880,7 +2009,7 @@ int tsfp_stereo_model_begin(uint32_t instance, uint32_t node, uint32_t view)
                     avatar_world_pass() ? "world" : "another", node, view);
         }
     }
-    if (instance == avatar.body && avatar_world_pass()) {
+    if (instance == avatar.body && view == avatar.view && avatar_world_pass()) {
         if (!avatar.palette_patched && word(avatar.active_header) != avatar.header) {
             tsfp_guest_vm vm;
             xbox_GetGuestVirtualMemory(&vm);
@@ -1891,16 +2020,14 @@ int tsfp_stereo_model_begin(uint32_t instance, uint32_t node, uint32_t view)
             return previous;
         }
         const int first_node = !avatar.pose_prepared;
-        if (first_node) {
+        if (first_node)
             prepare_avatar_pose(view);
-            avatar.pose_prepared = 1;
-        }
         const int visible = !tsfp_avatar_hide_head(avatar.body_nodes, avatar.body_count, avatar.head, node);
         avatar.role = visible ? TSFP_MODEL_BODY : TSFP_MODEL_HIDDEN;
         if (!visible)
             return previous;
         int restore = previous;
-        if (first_node) {
+        if (first_node && avatar.pose_prepared) {
             tsfp_vk_avatar_capture_begin();
             restore |= TSFP_CAPTURE_BODY;
         }
@@ -1909,11 +2036,10 @@ int tsfp_stereo_model_begin(uint32_t instance, uint32_t node, uint32_t view)
             restore |= TSFP_RESTORE_PALETTE;
         }
         return restore;
-    } else if ((instance == held.model[0] || instance == held.model[1]) && avatar.body && avatar_world_pass()) {
-        if (!avatar.pose_prepared) {
+    } else if ((instance == held.model[0] || instance == held.model[1]) && avatar.body &&
+               view == avatar.view && avatar_world_pass()) {
+        if (!avatar.pose_prepared)
             prepare_avatar_pose(view);
-            avatar.pose_prepared = 1;
-        }
         const unsigned slot = instance == held.model[TSFP_MAIN_HAND_SLOT] ?
             TSFP_MAIN_HAND_SLOT : TSFP_OFF_HAND_SLOT;
         const unsigned hand = kept.slot_hand[slot];
@@ -1988,8 +2114,6 @@ static const uint8_t *entity_from_handle(const tsfp_guest_vm *vm, uint32_t handl
     return entity && word(entity + 0x2cu) == handle ? entity : NULL;
 }
 
-enum { TSFP_CAMERA_VEHICLE = 0x400u };
-
 int tsfp_stereo_in_vehicle(void)
 {
     tsfp_guest_vm vm;
@@ -2046,7 +2170,7 @@ void tsfp_stereo_apply_snap_turn(void)
     if (!player || word(player + 4) != 0)
         return;
     const uint32_t mode = word(player + 0x114u);
-    if (mode != 2 && mode != 4 && mode != 0x800)
+    if (mode != 2 && mode != 4 && mode != 0x800 && !catacombs_rider(&vm, player))
         return;
     float yaw;
     memcpy(&yaw, player + 0x100u, sizeof yaw);
@@ -2066,6 +2190,26 @@ void tsfp_stereo_probe_camera(uint32_t caller)
     /* This is the player's projection setup, before world geometry. Start
      * the XR frame here and reuse the same poses at presentation. */
     tsfp_xr_prepare_scene_frame();
+#ifndef TSFP_RELEASE
+    tsfp_guest_vm diagnostics;
+    xbox_GetGuestVirtualMemory(&diagnostics);
+    const uint8_t *player = local_player(&diagnostics, guest_word(&diagnostics, 0x007B0C7Cu));
+    if (player && guest_word(&diagnostics, 0x0079094Cu) == TSFP_SCENE_CATACOMBS) {
+        static uint32_t last_mode, last_vehicle;
+        const uint32_t mode = word(player + 0x114u), entity = word(player + 0x14u);
+        const uint32_t actor = entity ? guest_word(&diagnostics, entity + 0x7cu) : 0;
+        const uint32_t vehicle = actor ? guest_word(&diagnostics, actor + 0xc08u) : 0;
+        if (mode != last_mode || vehicle != last_vehicle) {
+            last_mode = mode;
+            last_vehicle = vehicle;
+            const uint32_t view = word(player + 8u);
+            fprintf(stderr, "[M6] mode=%x rider=%d mounted=%d cart=%08x camera=%x flags=%x weapons=%u/%u\n",
+                    mode, catacombs_rider(&diagnostics, player), tsfp_stereo_mounted_gun(), vehicle,
+                    guest_word(&diagnostics, view + 0x218u), guest_word(&diagnostics, view + 0x21cu),
+                    word(player + TSFP_PLAYER_OFF_HAND + 0x30u), word(player + TSFP_PLAYER_MAIN_HAND + 0x30u));
+        }
+    }
+#endif
     if (camera_calls++ % 300u != 0)
         return;
 
@@ -2108,16 +2252,10 @@ static void log_matrix(const char *name, const float matrix[16])
 int tsfp_xr_locate_stereo(XrSession session, XrSpace local, XrTime display_time,
                           XrView eyes[TSFP_XR_EYES])
 {
-    XrViewLocateInfo locate = { .type = XR_TYPE_VIEW_LOCATE_INFO,
-        .viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
-        .displayTime = display_time, .space = local };
-    XrViewState state = { .type = XR_TYPE_VIEW_STATE };
-    for (unsigned eye = 0; eye < TSFP_XR_EYES; ++eye)
-        eyes[eye] = (XrView){ .type = XR_TYPE_VIEW };
-    uint32_t count = 0;
-    const XrViewStateFlags valid = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
-    const XrResult result = xrLocateViews(session, &locate, &state, TSFP_XR_EYES, &count, eyes);
-    return XR_SUCCEEDED(result) && count == TSFP_XR_EYES && (state.viewStateFlags & valid) == valid;
+    XrViewState state;
+    uint32_t count;
+    const XrResult result = recompvr_locate_stereo(session, local, display_time, eyes, &state, &count);
+    return XR_SUCCEEDED(result) && recompvr_stereo_valid(&state, count);
 }
 
 void tsfp_stereo_probe_frame(XrSession session, XrSpace local, XrTime display_time,

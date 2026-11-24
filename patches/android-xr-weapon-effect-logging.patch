@@ -1,0 +1,28 @@
+--- a/src/d3d/rhi_vulkan.c
++++ b/src/d3d/rhi_vulkan.c
+@@ -4861,9 +4861,10 @@
+     const int routine = tsfp_stereo_screen_effect_draw();
+     if (!routine || !V.rt_color)
+         return;
+-    static struct { int routine; unsigned paths; } seen[4];
++    static struct { int routine; unsigned paths; } seen[12];
+     const int scene = V.rt_color->image == V.xr_world_color;
+-    const unsigned path = V.view_mask ? V.view_mask :
++    const unsigned path = V.xr_ghost_eye ? (scene ? 16 : 12) + V.xr_ghost_eye :
++                          V.view_mask ? V.view_mask :
+                           V.xr_effect_view_mask ? (scene ? 8 : 4) + V.xr_effect_view_mask : 0;
+     const unsigned bit = 1u << path;
+     for (unsigned i = 0; i < sizeof seen / sizeof seen[0]; ++i) {
+@@ -4873,10 +4874,10 @@
+             continue;
+         if (!(seen[i].paths & bit)) {
+             seen[i].paths |= bit;
+-            fprintf(stderr, "[XR-FX] guest=%08x %s=%ux%u eyes=%u pass=%u fullscreen=%d\n",
++            fprintf(stderr, "[XR-FX] guest=%08x %s=%ux%u eyes=%u pass=%u fullscreen=%d eye=%u\n",
+                     routine, scene ? "scene" : "target",
+                     V.area.width, V.area.height, V.view_mask, V.xr_effect_view_mask,
+-                    xr_fullscreen_draw());
++                    xr_fullscreen_draw(), V.xr_ghost_eye);
+         }
+         return;
+     }

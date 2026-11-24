@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/.." && pwd -P)
+if [[ -r "$root/../build-env.sh" ]]; then
+    source "$root/../build-env.sh"
+fi
 sdk=${ANDROID_HOME:-"$root/../rechan-quest/.toolchain/sdk"}
 java_home=${JAVA_HOME:-"$root/../rechan-quest/.toolchain/jdk/Contents/Home"}
 export JAVA_HOME="$java_home"
@@ -12,6 +15,13 @@ tools="$sdk/build-tools/35.0.0"
 android_jar="$sdk/platforms/android-35/android.jar"
 pc="$root/external/tsfp-pc"
 runtime="$pc/external/ts3FPrecomp"
+recompvr=${TSFP_RECOMPVR_ROOT:-"$root/external/RecompVR"}
+if [[ ! -f "$recompvr/CMakeLists.txt" || ! -f "$recompvr/include/recompvr/openxr.h" ]]; then
+    printf 'RecompVR source is unavailable: %s\nRun from the checkout root: git submodule update --init --recursive external/RecompVR\n' \
+        "$recompvr" >&2
+    exit 1
+fi
+recompvr=$(cd "$recompvr" && pwd -P)
 output="$root/build/android"
 release=OFF
 optimize_guest=OFF
@@ -31,6 +41,18 @@ if [[ $# -gt 1 || ( $# -eq 1 && $release == OFF ) ]]; then
     exit 2
 fi
 key="$output/debug.keystore"
+if [[ -L "$root/build" ]]; then
+    key="$root/private/signing/debug.keystore"
+fi
+
+guest_gen="$runtime/titles/futureperfect/src/recomp/gen"
+for path in "$root/build" "$guest_gen"; do
+    if [[ -L "$path" && ! -d "$path" ]]; then
+        printf 'Storage is unavailable: %s -> %s\nMount the project data drive (docs/build.md).\n' \
+            "$path" "$(readlink "$path")" >&2
+        exit 1
+    fi
+done
 
 apply_patch() {
     local checkout=$1 patch="$root/patches/$2"
@@ -76,6 +98,8 @@ runtime_followups=(
     android-xr-cinematics.patch
     android-xr-chapter-mattes.patch
     android-xr-matte-fallback.patch
+    android-xr-mag-charger-resolution.patch
+    android-xr-weapon-effect-logging.patch
 )
 # Check the newest matching patch first because later patches can change
 # context needed to reverse-check an earlier one.
@@ -95,6 +119,7 @@ for (( next=applied+1; next<count; ++next )); do
     apply_patch "$runtime" "${runtime_followups[next]}"
 done
 apply_patch "$runtime" android-vr-options.patch
+apply_patch "$runtime" android-xr-catacombs-trace.patch
 
 xr_api="$root/build/openxr-api"
 xr_source="$root/external/openxr-sdk-source"
@@ -144,12 +169,20 @@ fi
     -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=29 -DANDROID_STL=c++_static \
     -DCMAKE_BUILD_TYPE=MinSizeRel -DTSFP_BUILD_RUNTIME=ON \
-    -DTSFP_RELEASE="$release" -DXR_API="$xr_api" \
+    -DTSFP_RELEASE="$release" -DXR_API="$xr_api" -DRECOMPVR_ROOT="$recompvr" \
     -DTSFP_OPTIMIZE_GUEST="$optimize_guest"
 "$cmake/cmake" --build "$output" --target tsfp_boot --parallel "${TSFP_JOBS:-6}"
 
-stage=$(mktemp -d "$output/apk-stage.XXXXXX")
-trap 'rm -rf "$stage"' EXIT
+# Keep APK staging on the host filesystem so ZIP never sees exFAT metadata.
+stage=$(mktemp -d "${TMPDIR:-/tmp}/tsfp-apk-stage.XXXXXX")
+apk_tmp=
+cleanup() {
+    rm -rf "$stage"
+    if [[ -n "$apk_tmp" ]]; then
+        rm -f "$apk_tmp"
+    fi
+}
+trap cleanup EXIT
 mkdir -p "$stage/classes" "$stage/lib/arm64-v8a"
 SDL_JAVA="$runtime/third_party/SDL/android-project/app/src/main/java/org/libsdl/app"
 manifest="$root/android/AndroidManifest.xml"
@@ -191,5 +224,7 @@ else
         --out "$stage/signed.apk" "$stage/aligned.apk"
 fi
 "$tools/apksigner" verify "$stage/signed.apk"
-mv "$stage/signed.apk" "$apk"
+apk_tmp=$(mktemp "$output/.tsfp-apk.XXXXXX")
+cp -p "$stage/signed.apk" "$apk_tmp"
+mv -f "$apk_tmp" "$apk"
 printf '%s\n' "$apk"

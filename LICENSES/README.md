@@ -51,3 +51,11 @@ dependencies, or for providing corresponding source when their terms require it.
 and Cousine font files (SIL OFL1.1). Their complete licenses are retained beside
 the fonts and copied into game packages. The shared rasterizer is
 [stb_truetype](../vendor/stb/stb_truetype.h), under its [MIT license](../vendor/stb/LICENSE).
+
+## RecompVR
+
+The shared OpenXR helpers are pinned as `external/RecompVR` at
+`f59e9d7abc2c4697c6dae2b6b365b87b3d1603e8`, under the
+[MIT license](https://github.com/Yurgil/RecompVR/blob/f59e9d7abc2c4697c6dae2b6b365b87b3d1603e8/LICENSE).
+The Git submodule contains the corresponding source. APK release license archives
+include the MIT notice; the Quest port retains its own GPL-3.0-only terms.
