@@ -4,6 +4,8 @@
 #include "pc_native_numeric.h"
 
 void tsfp_quest_projectile(void);
+void tsfp_quest_grenade_constructor(void);
+void tsfp_quest_cart_actor_projectile(void);
 void tsfp_quest_trace_projectile(void);
 void tsfp_quest_muzzle_flash(void);
 void tsfp_quest_muzzle_flash_position(void);
@@ -11,7 +13,10 @@ void tsfp_quest_shot_effect_position(void);
 void tsfp_quest_weapon_particles(void);
 void tsfp_quest_legacy_reticle(void);
 void tsfp_quest_alternate_reticle(void);
+void tsfp_quest_mech_reticle(void);
 void tsfp_quest_turret_look(void);
+void tsfp_quest_vehicle_update(void);
+void tsfp_quest_cart_visible(void);
 void tsfp_quest_hud(void);
 void tsfp_quest_objective_notice(void);
 void tsfp_quest_screen_effects(void);
@@ -35,6 +40,17 @@ void tsfp_quest_uplink_map_source(void);
 int tsfp_quest_uplink_physics_begin(uint32_t callback);
 void tsfp_quest_uplink_physics_end(void);
 
+/* Skip cart hooks outside the Catacombs story scene. This runs at guest
+ * call sites that also serve ordinary object culling and NPC fire. */
+static inline int tsfp_quest_catacombs_scene(void)
+{
+    const uint32_t scene = *(const uint32_t *)((uintptr_t)0x0079094cu + g_xbox_mem_offset);
+    if (scene != 17u)
+        return 0;
+    const uint32_t mode = *(const uint32_t *)((uintptr_t)0x0078ad20u + g_xbox_mem_offset);
+    return mode == 4u || mode == 14u;
+}
+
 /* These call sites are in the US Xbox executable. Keep the PC numeric
  * policy for all other calls in this generated translation unit. */
 typedef void (*TsfpGuestCallee)(void);
@@ -46,9 +62,20 @@ static inline __attribute__((always_inline)) TsfpGuestCallee tsfp_quest_guest_ca
     case 0x00086579u:
     case 0x00086DE4u: return tsfp_quest_object_visibility;
     case 0x000A249Eu: return tsfp_quest_object_occlusion;
+    case 0x000A1C42u:
+    case 0x000A1C75u:
+    case 0x000A1CA5u:
+    case 0x000A2AB3u:
+        if (tsfp_quest_catacombs_scene())
+            return tsfp_quest_cart_visible;
+        break;
     case 0x001C0B97u: return tsfp_quest_projectile;
-#ifdef TSFP_TRACE_CART
+    case 0x001B79F0u: return tsfp_quest_grenade_constructor;
     case 0x001BC451u:
+        if (tsfp_quest_catacombs_scene())
+            return tsfp_quest_cart_actor_projectile;
+        break;
+#ifdef TSFP_TRACE_CART
     case 0x001BC876u:
     case 0x002457C2u: return tsfp_quest_trace_projectile;
 #endif
@@ -57,11 +84,14 @@ static inline __attribute__((always_inline)) TsfpGuestCallee tsfp_quest_guest_ca
     case 0x001B86A2u:
     case 0x001B8723u:
     case 0x001B87C3u: return tsfp_quest_muzzle_flash_position;
+    case 0x001BC470u:
     case 0x001C0EC0u: return tsfp_quest_shot_effect_position;
     case 0x0011219Au: return tsfp_quest_weapon_particles;
     case 0x001CEEDEu: return tsfp_quest_legacy_reticle;
     case 0x0014D324u: return tsfp_quest_alternate_reticle;
+    case 0x0014F1C7u: return tsfp_quest_mech_reticle;
     case 0x000D6275u: return tsfp_quest_turret_look;
+    case 0x000D648Au: return tsfp_quest_vehicle_update;
     case 0x001CE9D1u: return tsfp_quest_hud;
     case 0x0014D655u: return tsfp_quest_objective_notice;
     case 0x001CED85u:

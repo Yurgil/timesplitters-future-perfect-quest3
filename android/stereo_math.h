@@ -74,6 +74,14 @@ static inline TsfpRightStickInput tsfp_right_stick(XrVector2f stick, int mounted
     return input;
 }
 
+/* A passenger's view can turn relative to the cart without feeding the
+ * added yaw back into the guest's automatic seat-facing update. */
+static inline float tsfp_cart_turn(float offset, float stick, int snap, float seconds)
+{
+    const float smooth = 90.0f * stick * fminf(0.1f, fmaxf(0.0f, seconds));
+    return remainderf(offset - (snap ? snap : smooth), 360.0f);
+}
+
 /* Rotate the source mesh around its wrist and keep the wrist exactly at
  * the tracked grip, independent of the current head pose. */
 static inline XrPosef tsfp_wrist_pose(XrVector3f grip, XrQuaternionf model_orientation,
@@ -311,7 +319,8 @@ static inline int tsfp_xbox_eye_transform(XrMatrix4x4f *out, const XrMatrix4x4f 
  * The guest's depth was for a 2D overlay. Use one distance for both eyes
  * while preserving the lens's angular size and center. */
 static inline XrMatrix4x4f tsfp_turret_reticle_transform(const XrMatrix4x4f *game,
-                                                        const XrPosef *anchor, const XrView *eye)
+                                                        const XrPosef *anchor, const XrView *eye,
+                                                        const XrVector2f *center)
 {
     const float distance = 10.0f;
     const float z = copysignf(distance, game->m[11]);
@@ -319,8 +328,8 @@ static inline XrMatrix4x4f tsfp_turret_reticle_transform(const XrMatrix4x4f *gam
     XrMatrix4x4f panel = {{0}};
     panel.m[0] = w / game->m[0];
     panel.m[5] = w / game->m[5];
-    panel.m[12] = -game->m[8] * z / game->m[0];
-    panel.m[13] = -game->m[9] * z / game->m[5];
+    panel.m[12] = center ? center->x : -game->m[8] * z / game->m[0];
+    panel.m[13] = center ? center->y : -game->m[9] * z / game->m[5];
     panel.m[14] = -distance;
     panel.m[15] = 1.0f;
     const XrMatrix4x4f clip_from_anchor = tsfp_eye_clip_for_api(anchor, eye, 0.1f, 100.0f, GRAPHICS_D3D);

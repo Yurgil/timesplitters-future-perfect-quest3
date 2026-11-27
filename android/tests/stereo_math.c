@@ -26,6 +26,16 @@ int main(void)
     }
     assert(!tsfp_turret_camera_mode(2u) && !tsfp_turret_camera_mode(0x400u));
 
+    assert(tsfp_cart_turn(12.0f, 0, 45, 1.0f / 72) == -33.0f);
+    assert(tsfp_cart_turn(170.0f, 0, -30, 1.0f / 72) == -160.0f);
+    assert(tsfp_cart_turn(27.0f, 0, 0, 1.0f / 72) == 27.0f);
+    for (int hz = 60; hz <= 120; hz += 60) {
+        float offset = 0.0f;
+        for (int tick = 0; tick < hz; ++tick)
+            offset = tsfp_cart_turn(offset, 1.0f, 0, 1.0f / hz);
+        assert(fabsf(offset + 90.0f) < .001f);
+    }
+
     /* A fresh installation must use the calibrated hold even when the
        character animation has rolled the wrist upside down. */
     for (unsigned hand = 0; hand < TSFP_AVATAR_HANDS; ++hand) {
@@ -412,7 +422,7 @@ int main(void)
         view->pose.position.y += 0.1f;
         view->fov.angleLeft += eye == 0 ? -0.05f : 0.03f;
         view->fov.angleUp += eye == 0 ? 0.03f : -0.02f;
-        const XrMatrix4x4f reticle = tsfp_turret_reticle_transform(&turret_lens, &anchor, view);
+        const XrMatrix4x4f reticle = tsfp_turret_reticle_transform(&turret_lens, &anchor, view, NULL);
         XrMatrix4x4f eye_from_clip, eye_from_turret;
         assert(tsfp_xbox_eye_transform(&eye_from_clip, &turret_lens, &anchor, view, 1.0f));
         XrMatrix4x4f_Multiply(&eye_from_turret, &eye_from_clip, &turret_lens);
@@ -421,6 +431,18 @@ int main(void)
         const XrVector3f sprite = ndc(&reticle, 0, 0, 0);
         assert(fabsf(sprite.x - target.x) < 1e-5f && fabsf(sprite.y - target.y) < 1e-5f);
         assert(fabsf(ndc(&reticle, 0, 0, 1).z - sprite.z) < 1e-5f);
+
+        /* Battle Mech shares the camera bore. The final cockpit fires
+         * from the midpoint of two barrels below the camera. */
+        const XrVector2f mech_centers[] = {{0, 0}, {0.0f, -0.5f}, {.12f, -.36f}};
+        for (unsigned i = 0; i < sizeof mech_centers / sizeof mech_centers[0]; ++i) {
+            const XrVector2f *center = &mech_centers[i];
+            const XrMatrix4x4f aim_panel = tsfp_turret_reticle_transform(&turret_lens, &anchor, view, center);
+            const XrVector3f shot = ndc(&eye_from_turret, center->x, center->y, -10.0f);
+            const XrVector3f mark = ndc(&aim_panel, 0, 0, 0);
+            assert(fabsf(mark.x - shot.x) < 1e-5f && fabsf(mark.y - shot.y) < 1e-5f);
+            assert(fabsf(sprite.y - mark.y) > 1e-3f);
+        }
     }
 
     XrMatrix4x4f viewmodel = us_xbox;

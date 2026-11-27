@@ -64,8 +64,14 @@ int tsfp_stereo_body_matrices(float rows[32]);
 int tsfp_stereo_held_matrices(unsigned hand, float rows[32]);
 void tsfp_stereo_overlay(int begin);
 int tsfp_stereo_hud_draw(void);
-void tsfp_stereo_turret_reticle(int draw);
+typedef enum {
+    TSFP_RETICLE_NONE,
+    TSFP_RETICLE_TURRET,
+    TSFP_RETICLE_MECH,
+} TsfpReticleDraw;
+void tsfp_stereo_turret_reticle(TsfpReticleDraw draw);
 int tsfp_stereo_turret_reticle_draw(void);
+int tsfp_stereo_mech_reticle_center(XrVector2f *center);
 int tsfp_xr_turret_reticle_matrices(float rows[32]);
 int tsfp_stereo_screen_effect_draw(void);
 typedef enum {
@@ -108,8 +114,24 @@ static inline int tsfp_turret_camera_mode(uint32_t mode)
     return mode == 0x20u || tsfp_turret_uses_aim_bindings(mode) || mode == 0x10000u;
 }
 
+enum {
+    TSFP_CAMERA_SCRIPTED = 0x100u,
+    TSFP_CAMERA_BATTLE_MECH = 0x8000u,
+};
+
+typedef enum {
+    TSFP_VEHICLE_LOOK_DEFAULT,
+    TSFP_VEHICLE_LOOK_GUNNER,
+    TSFP_VEHICLE_LOOK_TRACKED_DRIVER,
+    TSFP_VEHICLE_LOOK_MECH,
+} TsfpVehicleLook;
+
 int tsfp_stereo_in_vehicle(void);
+TsfpVehicleLook tsfp_stereo_vehicle_look(void);
 int tsfp_stereo_mounted_gun(void);
+int tsfp_stereo_cart_riding(void);
+void tsfp_stereo_cart_update(void (*update)(void));
+int tsfp_stereo_cart_visible(uint32_t entity, uint32_t view);
 int tsfp_stereo_sniper_shield_active(void);
 int tsfp_stereo_uplink_physics_begin(uint32_t target);
 void tsfp_stereo_uplink_physics_end(void);

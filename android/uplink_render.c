@@ -1,4 +1,5 @@
 #include "uplink_render.h"
+#include "grenade_preview.h"
 #include "stereo_backend.h"
 #include "xr.h"
 #include "xr_linear.h"
@@ -38,7 +39,7 @@ static const char shader[] =
     "  return float4(tint.rgb, hit * tint.a);\n"
     "}\n";
 
-void tsfp_uplink_render_destroy(void)
+static void destroy_uplink_renderer(void)
 {
     if (renderer.vertex) rhi_shader_destroy(renderer.vertex);
     if (renderer.marker) rhi_shader_destroy(renderer.marker);
@@ -47,6 +48,12 @@ void tsfp_uplink_render_destroy(void)
     if (renderer.depth) rhi_depth_state_destroy(renderer.depth);
     if (renderer.raster) rhi_raster_state_destroy(renderer.raster);
     memset(&renderer, 0, sizeof renderer);
+}
+
+void tsfp_uplink_render_destroy(void)
+{
+    tsfp_grenade_render_destroy();
+    destroy_uplink_renderer();
 }
 
 static int initialize(void)
@@ -83,7 +90,7 @@ static int initialize(void)
 
 fail:
     fprintf(stderr, "[6DoF] Could not initialize the Uplink effect renderer %s\n", error);
-    tsfp_uplink_render_destroy();
+    destroy_uplink_renderer();
     renderer.attempted = 1;
     return 0;
 }

@@ -165,6 +165,37 @@ tools="$ANDROID_HOME/build-tools/35.0.0"
 
 Follow the [installation instructions](../README.md#install-a-release-apk) using this APK. Saves live in the app's private data directory. For diagnostic builds, see [M0](m0.md) and [M3](m3.md).
 
+## Catacombs cart test
+
+Build the optimized ARM64 runtime first using the release build above. Run
+the scenario packager against that build and a debug-signed APK for this
+checkout. The reference APK supplies the OpenXR loader and signing identity.
+
+```sh
+python3 android/tests/build_cart_segment.py \
+  build/android-release/timesplitters-quest3-0.3.108-xr-mech-reticle.apk \
+  build/android-release/timesplitters-quest3-0.3.108-xr-cart-test-r3.apk --revision=-r3 --diagnostic
+```
+
+The test package uses the installed game's application ID and imported game
+data. Updating closes the open game session. On first launch it copies
+`files/saves/UserData` to `files/cart-test-saves/UserData` to make the same
+missions available in the test profile. The test stores its progress there.
+
+Choose mission 6 (What Lies Below) in single-player Story. As soon as the
+intro hands control to the player, the test runs the authored minecart spawn
+action and refreshes the player room at the track. Use the right stick, look
+down, then fire while moving the weapon hand. Reload the mission for another run.
+
+```sh
+adb logcat -s TSFP_CART
+```
+
+Look for `cart action executed`, `board ok`, `turn`, `body draw` and `shot`.
+The shot entry records the guest call site, muzzle, direction and the cart entity origin.
+The diagnostic build also keeps boarding output in `files/boot.log` and supports
+the scripted input and frame readback described in [M2](m2.md).
+
 ## Component licenses
 
 RecompVR has its own [MIT license](https://github.com/Yurgil/RecompVR/blob/f59e9d7abc2c4697c6dae2b6b365b87b3d1603e8/LICENSE). Include this

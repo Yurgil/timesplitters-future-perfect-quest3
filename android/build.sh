@@ -193,7 +193,7 @@ if [[ $release == OFF ]]; then
         "$manifest" > "$stage/AndroidManifest.xml"
     manifest="$stage/AndroidManifest.xml"
 fi
-printf 'package org.tsfp.quest;\nfinal class BuildConfig { static final boolean DIAGNOSTICS = %s; }\n' \
+printf 'package org.tsfp.quest;\nfinal class BuildConfig { static final boolean DIAGNOSTICS = %s; static final boolean CART_TEST = false; }\n' \
     "$diagnostics" > "$stage/BuildConfig.java"
 javac --release 8 -classpath "$android_jar" -d "$stage/classes" \
     "$SDL_JAVA"/*.java "$root/android/java/org/tsfp/quest/"*.java "$stage/BuildConfig.java"

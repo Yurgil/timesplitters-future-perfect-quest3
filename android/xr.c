@@ -90,6 +90,7 @@ static struct {
 static pthread_mutex_t input_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t frame_lock = PTHREAD_MUTEX_INITIALIZER;
 static RecompPadState pad;
+static int16_t cart_turn_axis;
 
 #ifndef TSFP_RELEASE
 static struct {
@@ -212,6 +213,11 @@ int tsfp_xr_geometry_enabled(void) { return geometry_requested; }
 unsigned tsfp_xr_msaa(void) { return msaa_samples; }
 unsigned tsfp_xr_anisotropy(void) { return anisotropic_filtering; }
 VkExtent2D tsfp_xr_geometry_extent(void) { return xr.geometry_extent; }
+int tsfp_xr_snap_turn_pending(void)
+{
+    return atomic_load_explicit(&pending_snap, memory_order_relaxed) != 0;
+}
+
 int tsfp_xr_take_snap_turn(void)
 {
     const int turn = atomic_exchange(&pending_snap, 0);
@@ -608,9 +614,14 @@ int tsfp_xr_create_screen(VkInstance instance, VkPhysicalDevice physical, VkDevi
     return 1;
 }
 
-static void publish_pad(RecompPadState state)
+static void publish_pad(RecompPadState state, int cart_rider)
 {
     pthread_mutex_lock(&input_lock);
+    /* The guest also turns the cart on RX. Send the axis only to the
+     * VR cart camera so the guest cannot feed its yaw back into the turn. */
+    cart_turn_axis = cart_rider ? state.rx : 0;
+    if (cart_rider)
+        state.rx = 0;
     pad = state;
     pthread_mutex_unlock(&input_lock);
 }
@@ -623,6 +634,14 @@ int tsfp_xr_read_pad(int slot, RecompPadState *out)
     *out = pad;
     pthread_mutex_unlock(&input_lock);
     return 1;
+}
+
+int16_t tsfp_xr_cart_turn_axis(void)
+{
+    pthread_mutex_lock(&input_lock);
+    const int16_t axis = cart_turn_axis;
+    pthread_mutex_unlock(&input_lock);
+    return axis;
 }
 
 static XrActionStateGetInfo action_info(int action, int hand)
@@ -754,17 +773,19 @@ static void sync_controls(int immersive)
     if (xr.state != XR_SESSION_STATE_FOCUSED || xrSyncActions(xr.session, &sync) != XR_SUCCESS) {
         reset_vr_controls();
         xr.scope.previous_buttons = UINT32_MAX;
-        publish_pad(state);
+        publish_pad(state, 0);
         return;
     }
     XrVector2f left = stick(LEFT), right = stick(RIGHT);
-    const int mounted = immersive && tsfp_stereo_mounted_gun();
+    const TsfpVehicleLook vehicle_look = immersive ? tsfp_stereo_vehicle_look() : TSFP_VEHICLE_LOOK_DEFAULT;
+    const int mounted = vehicle_look == TSFP_VEHICLE_LOOK_GUNNER;
     if (immersive) {
         if (xr.eyes_valid) {
             locate_touch_poses();
-            left = tsfp_head_relative_stick(left, head_orientation(), xr.anchor.orientation);
+            if (vehicle_look != TSFP_VEHICLE_LOOK_TRACKED_DRIVER)
+                left = tsfp_head_relative_stick(left, head_orientation(), xr.anchor.orientation);
         }
-        vr_right_stick(&state, right, mounted);
+        vr_right_stick(&state, right, vehicle_look != TSFP_VEHICLE_LOOK_DEFAULT);
     } else {
         reset_vr_controls();
         state.rx = axis(right.x);
@@ -810,7 +831,7 @@ static void sync_controls(int immersive)
         fprintf(stderr, "[XR] First Touch input delivered to player 1\n");
         logged = 1;
     }
-    publish_pad(state);
+    publish_pad(state, immersive && geometry_requested && tsfp_stereo_cart_riding());
 }
 
 static void poll_events(void)
@@ -918,7 +939,7 @@ static int open_frame(int early)
         return 1;
     poll_events();
     if (!xr.running) {
-        publish_pad((RecompPadState){0});
+        publish_pad((RecompPadState){0}, 0);
         return 0;
     }
 #ifndef TSFP_RELEASE
@@ -1267,8 +1288,10 @@ int tsfp_xr_turret_reticle_matrices(float rows[32])
     XrMatrix4x4f game;
     if (!xr.world_active || !tsfp_stereo_world_projection(game.m))
         return 0;
+    XrVector2f center;
+    const XrVector2f *aim = tsfp_stereo_mech_reticle_center(&center) ? &center : NULL;
     for (unsigned eye = 0; eye < TSFP_XR_EYES; ++eye) {
-        const XrMatrix4x4f transform = tsfp_turret_reticle_transform(&game, &xr.anchor, &xr.eyes[eye]);
+        const XrMatrix4x4f transform = tsfp_turret_reticle_transform(&game, &xr.anchor, &xr.eyes[eye], aim);
         for (unsigned r = 0; r < 4; ++r)
             for (unsigned c = 0; c < 4; ++c)
                 rows[eye * 16 + r * 4 + c] = transform.m[c * 4 + r];
@@ -1565,5 +1588,5 @@ void tsfp_xr_destroy(void)
     memset(&stereo_diagnostic, 0, sizeof stereo_diagnostic);
 #endif
     pthread_mutex_unlock(&frame_lock);
-    publish_pad((RecompPadState){0});
+    publish_pad((RecompPadState){0}, 0);
 }

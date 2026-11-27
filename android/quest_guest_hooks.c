@@ -2,13 +2,21 @@
 #ifndef TSFP_RELEASE
 #include "hitch_trace.h"
 #endif
+#include "grenade_preview.h"
+#include "guest_virtual_memory.h"
 #include "stereo_backend.h"
+#include "xbox_memory_layout.h"
 #include "stereo_probe.h"
 #include "uplink_render.h"
 #include <string.h>
+#ifdef TSFP_CART_TEST
+#include "catacombs_cart.h"
+#include <android/log.h>
+#endif
 
 extern int tsfp_xr_geometry_enabled(void);
 extern void tsfp_stereo_redirect_projectile(uint32_t stack, uint32_t hand_record);
+extern void tsfp_stereo_cart_actor_projectile(uint32_t stack, void (*fire)(void));
 extern int tsfp_stereo_flash_begin(uint32_t stack);
 extern void tsfp_stereo_flash_end(int role);
 extern void tsfp_stereo_flash_position(uint32_t record, uint32_t output, int shot_effect);
@@ -57,6 +65,14 @@ void tsfp_quest_projectile(void)
 #endif
     tsfp_stereo_redirect_projectile(g_esp, g_ebx);
     sub_001B7680();
+}
+
+void tsfp_quest_cart_actor_projectile(void)
+{
+#ifndef TSFP_RELEASE
+    tsfp_stereo_trace_projectile(g_esp);
+#endif
+    tsfp_stereo_cart_actor_projectile(g_esp, sub_001B7680);
 }
 
 #ifndef TSFP_RELEASE
@@ -115,57 +131,116 @@ void tsfp_quest_weapon_particles(void)
     }
 }
 
-void tsfp_quest_turret_look(void)
+static void right_stick_aim(uint32_t player, uint32_t mode, void (*update)(void))
 {
-    const uint32_t player = MEM32(0x007B0C7Cu);
-    const uint32_t mode = player ? MEM32(player + 0x114u) : 0;
-    if (!tsfp_turret_uses_aim_bindings(mode) || MEM32(player + 4u) != 0 ||
-        !tsfp_xr_geometry_enabled()) {
-        sub_0025CE80();
-        return;
-    }
-    /* The two Xbox aim modes use different bindings. Some layouts take
-     * turret pitch from LY even when yaw uses RX. The separate movement
-     * bindings and the original sensitivity and inversion stay in use. */
     const uint32_t offsets[] = {0x58u, 0x5cu, 0x68u, 0x6cu};
     const uint32_t axes[] = {4u, 3u, 4u, 3u}; /* Xbox RY, RX */
+    /* The scripted cockpit reads only the first pitch/yaw pair. */
+    const unsigned count = mode == TSFP_CAMERA_SCRIPTED ? 2 : 4;
     uint32_t saved[4];
-    for (unsigned i = 0; i < sizeof offsets / sizeof offsets[0]; ++i) {
+    for (unsigned i = 0; i < count; ++i) {
         saved[i] = MEM32(player + offsets[i]);
         MEM32(player + offsets[i]) = axes[i];
     }
 #ifndef TSFP_RELEASE
     static uint32_t reported_modes;
     if (!(reported_modes & mode)) {
-        fprintf(stderr, "[XR-TURRET] Mode %x Xbox pitch/yaw bindings %u/%u and %u/%u routed to RY/RX\n",
-                mode, saved[0], saved[1], saved[2], saved[3]);
+        fprintf(stderr, "[%s] Mode %x Xbox pitch/yaw bindings routed to RY/RX\n",
+                tsfp_turret_uses_aim_bindings(mode) ? "XR-TURRET" : "XR-MECH", mode);
         reported_modes |= mode;
     }
 #endif
-    sub_0025CE80();
-    for (unsigned i = 0; i < sizeof offsets / sizeof offsets[0]; ++i)
+    update();
+    for (unsigned i = 0; i < count; ++i)
         MEM32(player + offsets[i]) = saved[i];
+}
+
+void tsfp_quest_turret_look(void)
+{
+    const uint32_t player = MEM32(0x007B0C7Cu);
+    const uint32_t mode = player ? MEM32(player + 0x114u) : 0;
+    /* 25CE80 supplies both turret aim and the look vector consumed by
+     * the Battle Mech update at 37AA70. It can use either binding pair. */
+    if ((tsfp_turret_uses_aim_bindings(mode) || mode == TSFP_CAMERA_BATTLE_MECH) &&
+        MEM32(player + 4u) == 0 && tsfp_xr_geometry_enabled()) {
+        right_stick_aim(player, mode, sub_0025CE80);
+        return;
+    }
+    sub_0025CE80();
+}
+
+void tsfp_quest_vehicle_update(void)
+{
+    const uint32_t player = MEM32(0x007B0C7Cu);
+    /* The scripted update calls 21C900, which reads aim axes itself. */
+    if (player && MEM32(player + 0x114u) == TSFP_CAMERA_SCRIPTED &&
+        tsfp_xr_geometry_enabled() && tsfp_stereo_vehicle_look() == TSFP_VEHICLE_LOOK_MECH) {
+        right_stick_aim(player, TSFP_CAMERA_SCRIPTED, sub_000D5C70);
+        return;
+    }
+    tsfp_stereo_cart_update(sub_000D5C70);
+}
+
+void tsfp_quest_cart_visible(void)
+{
+    const uint32_t entity = MEM32(g_esp + 4u);
+    const uint32_t camera = MEM32(0x007B0CC0u);
+    const uint32_t view = MEM32(g_esp) == 0x000A2AB8u && camera ?
+        MEM32(camera + 0x214u) : MEM32(g_esp + 8u);
+    sub_000A1AB0();
+    /* The portal plane result is still used for all other entities and
+     * views. The stereo eye frusta clip the local rider and attachments. */
+    if (!g_eax && tsfp_stereo_cart_visible(entity, view))
+        g_eax = 1;
+}
+
+static void draw_aim_panel(void (*draw)(void), TsfpReticleDraw role, uint32_t player)
+{
+    flush_guest_draws();
+    uint32_t saved_x = 0, saved_y = 0;
+    if (player) {
+        /* The guest subtracts these offsets from the viewport center. */
+        saved_x = MEM32(player + 0xf6cu);
+        saved_y = MEM32(player + 0xf70u);
+        MEM32(player + 0xf6cu) = MEM32(player + 0xf70u) = 0;
+    }
+    tsfp_stereo_turret_reticle(role);
+    draw();
+    if (player) {
+        MEM32(player + 0xf6cu) = saved_x;
+        MEM32(player + 0xf70u) = saved_y;
+    }
+    flush_guest_draws();
+    tsfp_stereo_turret_reticle(TSFP_RETICLE_NONE);
 }
 
 static void draw_mounted_reticle(void (*draw)(void))
 {
-    if (!tsfp_xr_world_active() || !tsfp_stereo_mounted_gun()) {
+    if (tsfp_xr_world_active() && tsfp_stereo_mounted_gun())
+        draw_aim_panel(draw, TSFP_RETICLE_TURRET, MEM32(0x007B0C7Cu));
+    else
         draw();
-        return;
-    }
+}
 
-    flush_guest_draws();
-    const uint32_t offset = MEM32(0x007B0C7Cu) + 0xf6cu;
-    const uint32_t saved_x = MEM32(offset), saved_y = MEM32(offset + 4u);
-    /* The stock reticle subtracts these offsets from the viewport center.
-     * Restore them before the guest continues its camera and aiming logic. */
-    MEM32(offset) = MEM32(offset + 4u) = 0;
-    tsfp_stereo_turret_reticle(1);
-    draw();
-    MEM32(offset) = saved_x;
-    MEM32(offset + 4u) = saved_y;
-    flush_guest_draws();
-    tsfp_stereo_turret_reticle(0);
+void tsfp_quest_mech_reticle(void)
+{
+    const uint32_t player = MEM32(0x007B0C7Cu);
+    if (tsfp_xr_world_active() && player && MEM32(player + 4u) == 0) {
+        const uint32_t mode = MEM32(player + 0x114u);
+        const uint32_t hud = MEM32(0x007A6160u);
+        /* 139010 selects 37A9D0 (Battle Mech) or 145E40 (final cockpit).
+         * The Battle Mech shares its muzzle and direction with the camera. */
+        if (mode == TSFP_CAMERA_BATTLE_MECH && hud == 0x24u) {
+            draw_aim_panel(sub_00139010, TSFP_RETICLE_MECH, player);
+            return;
+        }
+        if (mode == TSFP_CAMERA_SCRIPTED && hud == 0x26u &&
+            tsfp_stereo_vehicle_look() == TSFP_VEHICLE_LOOK_MECH) {
+            draw_aim_panel(sub_00139010, TSFP_RETICLE_MECH, 0);
+            return;
+        }
+    }
+    sub_00139010();
 }
 
 void tsfp_quest_legacy_reticle(void)
@@ -391,6 +466,10 @@ static void restore_effect_registers(const EffectRegisters *regs)
     memcpy(g_fp_stack, regs->fp_stack, sizeof regs->fp_stack);
 }
 
+#ifdef TSFP_CART_TEST
+#include "tests/cart_segment.inc"
+#endif
+
 static void set_guest_camera(uint32_t view, uint32_t projection)
 {
     const uint32_t stack = g_esp;
@@ -607,6 +686,184 @@ static void draw_uplink_beam(const TsfpUplinkVisual *visual)
     memcpy(g_fp_stack, fp_stack, sizeof fp_stack);
 }
 
+typedef struct {
+    XrVector3f start, delta, hit;
+    uint32_t room;
+    uint32_t contacts[64];
+} GrenadeSweepScratch;
+
+typedef struct {
+    GrenadeSweepScratch *scratch;
+    uint32_t address, category;
+    uint32_t *owner_flags, saved_flags;
+    EffectRegisters registers;
+} GrenadeSweepContext;
+
+static int grenade_sweep(void *opaque, XrVector3f start, XrVector3f end,
+                          uint32_t *room, XrVector3f *hit)
+{
+    GrenadeSweepContext *context = opaque;
+    GrenadeSweepScratch *scratch = context->scratch;
+    if ((int32_t)*room <= 0 || !tsfp_grenade_vector_valid(start) || !tsfp_grenade_vector_valid(end))
+        return -1;
+    scratch->start = start;
+    XrVector3f_Sub(&scratch->delta, &end, &start);
+    if (XrVector3f_Dot(&scratch->delta, &scratch->delta) <= 1e-7f)
+        return 0;
+    scratch->room = *room;
+    memset(scratch->contacts, 0, sizeof scratch->contacts);
+    const uint32_t base = context->address;
+    /* DCB80's stock sweep. The first result is the nearest contact point.
+     * Keep the next room for sweeps that cross a portal. */
+    const uint32_t args[] = {
+        *room, base + offsetof(GrenadeSweepScratch, start),
+        base + offsetof(GrenadeSweepScratch, delta), 0,
+        base + offsetof(GrenadeSweepScratch, hit), 0,
+        base + offsetof(GrenadeSweepScratch, room), context->category,
+        0x02000010u, base + offsetof(GrenadeSweepScratch, contacts),
+    };
+    g_esp = base;
+    for (unsigned i = sizeof args / sizeof args[0]; i > 0; --i)
+        PUSH32(g_esp, args[i - 1]);
+    PUSH32(g_esp, 0);
+    sub_00088C60();
+    *room = scratch->room;
+    if (g_eax) {
+        *hit = scratch->hit;
+        return 1;
+    }
+    return (int32_t)*room > 0 ? 0 : -1;
+}
+
+static int begin_grenade_sweeps(GrenadeSweepContext *context, const TsfpGrenadeSource *source,
+                               uint32_t kind)
+{
+    if (!source->shooter || (int32_t)source->room <= 0 || g_esp < 0x2000u)
+        return 0;
+    const uint32_t address = (g_esp - sizeof(GrenadeSweepScratch)) & ~15u;
+    tsfp_guest_vm vm;
+    xbox_GetGuestVirtualMemory(&vm);
+    GrenadeSweepScratch *scratch = vm.resolve(vm.host, address, sizeof *scratch, 1);
+    uint32_t *owner_flags = vm.resolve(vm.host, source->shooter + 0x28u, sizeof *owner_flags, 1);
+    if (!scratch || !owner_flags)
+        return 0;
+    /* The sticky plasma definition sets bit 0x200, which selects category 4 in DCB80. */
+    const uint32_t category = kind == TSFP_GRENADE_PLASMA_STICKY_KIND ? 4u :
+        (MEM32(0x00739A90u) == 1u ? 0x20u : 0u);
+    *context = (GrenadeSweepContext){
+        .scratch = scratch, .address = address, .category = category,
+        .owner_flags = owner_flags, .saved_flags = *owner_flags, .registers = effect_registers(),
+    };
+    /* Match the grenade's first stock sweep, which ignores its owner. */
+    *owner_flags &= ~0x60u;
+    return 1;
+}
+
+static void end_grenade_sweeps(const GrenadeSweepContext *context)
+{
+    *context->owner_flags = context->saved_flags;
+    restore_effect_registers(&context->registers);
+}
+
+static int checked_grenade_origin(const TsfpGrenadeSource *source, uint32_t kind,
+                                  XrVector3f *origin, uint32_t *room)
+{
+    GrenadeSweepContext context;
+    if (!begin_grenade_sweeps(&context, source, kind))
+        return 0;
+    const int ready = tsfp_grenade_clear_origin(source, tsfp_grenade_probe_drop(kind),
+                                                grenade_sweep, &context, origin, room);
+    end_grenade_sweeps(&context);
+    return ready;
+}
+
+typedef struct {
+    uint32_t args[16];
+    XrVector3f position, directions[3];
+} GrenadeConstructorScratch;
+
+static int redirect_grenade_constructor(uint32_t stack)
+{
+    enum { KIND = 1, ORIGIN, RAY_ORIGIN, MODEL_ORIGIN, RAY, SHOOTER = 9, ROOM = 13 };
+    if (stack < 0x2000u)
+        return 0;
+    const uint32_t kind = MEM32(stack + KIND * 4u);
+    if (!tsfp_grenade_weapon_for_kind(kind))
+        return 0;
+
+    tsfp_guest_vm vm;
+    xbox_GetGuestVirtualMemory(&vm);
+    const uint32_t base = (stack - sizeof(GrenadeConstructorScratch)) & ~15u;
+    GrenadeConstructorScratch *guest = vm.resolve(vm.host, base, sizeof *guest, 1);
+    const uint32_t *original = vm.resolve(vm.host, stack, sizeof guest->args, 0);
+    if (!original || !guest || !original[SHOOTER])
+        return 0;
+
+    XrVector3f directions[3];
+    for (unsigned i = 0; i < 3; ++i) {
+        const void *vector = vm.resolve(vm.host, original[RAY + i], sizeof directions[i], 0);
+        if (!vector)
+            return 0;
+        memcpy(&directions[i], vector, sizeof directions[i]);
+        if (!tsfp_grenade_vector_valid(directions[i]))
+            return 0;
+    }
+    XrVector3f position;
+    TsfpGrenadeSource source;
+    if (!tsfp_stereo_grenade_launch(original[SHOOTER], &source, &position, directions))
+        return 0;
+    for (unsigned i = 0; i < 3; ++i)
+        if (!tsfp_grenade_vector_valid(directions[i]))
+            return 0;
+
+    uint32_t room;
+    const int has_origin = checked_grenade_origin(&source, kind, &position, &room);
+    /* The collision call also uses the guest stack. Stage the constructor
+     * arguments after it returns. EAAF0 copies the input vectors. */
+    memcpy(guest->args, original, sizeof guest->args);
+    if (has_origin) {
+        guest->position = position;
+        const uint32_t address = base + offsetof(GrenadeConstructorScratch, position);
+        guest->args[ORIGIN] = guest->args[RAY_ORIGIN] = guest->args[MODEL_ORIGIN] = address;
+        guest->args[ROOM] = room;
+    }
+    memcpy(guest->directions, directions, sizeof directions);
+    for (unsigned i = 0; i < 3; ++i)
+        guest->args[RAY + i] = base + offsetof(GrenadeConstructorScratch, directions) + i * sizeof directions[i];
+    g_esp = base;
+    return 1;
+}
+
+void tsfp_quest_grenade_constructor(void)
+{
+    const uint32_t stack = g_esp;
+    const int redirected = redirect_grenade_constructor(stack);
+    sub_000EAAF0();
+    if (redirected)
+        g_esp = stack + 4u;
+}
+
+static void draw_grenade_preview(void)
+{
+    TsfpGrenadePreview preview;
+    GrenadeSweepContext context;
+    if (!tsfp_vk_uplink_world_bound() || !tsfp_stereo_grenade_preview(&preview) ||
+        !begin_grenade_sweeps(&context, &preview.source, preview.flight.kind))
+        return;
+
+    TsfpGrenadeArc arc = {.count = 0};
+    uint32_t room;
+    if (tsfp_grenade_clear_origin(&preview.source, preview.flight.probe_drop, grenade_sweep,
+                                  &context, &preview.flight.origin, &room))
+        tsfp_grenade_trace(&preview.flight, room, grenade_sweep, &context, &arc);
+    end_grenade_sweeps(&context);
+
+    if (arc.count > 1) {
+        flush_guest_draws();
+        tsfp_grenade_render(&arc, &preview.view);
+    }
+}
+
 void tsfp_quest_first_person_weapon_pass(void)
 {
     const int immersive = tsfp_stereo_immersive_player();
@@ -627,6 +884,7 @@ void tsfp_quest_first_person_weapon_pass(void)
             tsfp_scope_render(scope);
         }
         tsfp_vk_shield_capture(2);
+        draw_grenade_preview();
         preview_uplink_target();
         TsfpUplinkVisual visual;
         if (tsfp_stereo_uplink_visual(&visual)) {

@@ -8,6 +8,10 @@ void tsfp_xr_enable(const char *capture_prefix, const char *probe, const char *c
                     const char *hand_calibration,
                     unsigned msaa, unsigned anisotropy);
 int tsfp_xr_enabled(void);
+struct RecompPadState;
+int tsfp_xr_read_pad(int slot, struct RecompPadState *out);
+int16_t tsfp_xr_cart_turn_axis(void);
+int tsfp_xr_snap_turn_pending(void);
 void tsfp_xr_set_snap_degrees(int degrees);
 int tsfp_xr_geometry_enabled(void);
 unsigned tsfp_xr_msaa(void);
